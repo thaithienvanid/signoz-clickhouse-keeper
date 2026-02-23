@@ -188,9 +188,9 @@ graph TB
 
 ### Software Requirements
 
-- **Docker**: 20.10.0+ ([Install Guide](https://docs.docker.com/engine/install/))
-- **Docker Compose**: 2.0.0+ (usually bundled with Docker Desktop)
-- **Operating System**: Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+) or macOS
+- **Docker**: 25.0.0+ ([Install Guide](https://docs.docker.com/engine/install/))
+- **Docker Compose**: 5.0.0+ (usually bundled with Docker Desktop)
+- **Operating System**: Linux (Ubuntu 22.04+, Debian 12+, RHEL 9+) or macOS
 
 ### Network Ports
 
@@ -225,8 +225,8 @@ You need **6 configuration files**. Copy and paste each one exactly as shown.
 # Update these to change versions across all services
 
 # ClickHouse versions (server and keeper must be compatible)
-CLICKHOUSE_VERSION=25.5.6
-CLICKHOUSE_KEEPER_VERSION=25.5.6-alpine
+CLICKHOUSE_VERSION=26.1.3.52
+CLICKHOUSE_KEEPER_VERSION=26.1.3.52-alpine
 
 # SigNoz versions (use 'latest' for testing, pin versions for production)
 SIGNOZ_VERSION=latest
@@ -237,7 +237,6 @@ SCHEMA_MIGRATOR_VERSION=latest
 #### File 2: `docker-compose.yml` - Service Orchestration
 
 ```yaml
-version: "3.8"
 x-common: &common
   networks:
     - signoz-net
@@ -1431,8 +1430,8 @@ Create a new directory (e.g., `signoz-ha`) and place the following files inside 
 # It's recommended to use specific, stable versions for production.
 
 # ClickHouse and ClickHouse Keeper versions
-CLICKHOUSE_VERSION=25.5.6
-CLICKHOUSE_KEEPER_VERSION=25.5.6-alpine
+CLICKHOUSE_VERSION=26.1.3.52
+CLICKHOUSE_KEEPER_VERSION=26.1.3.52-alpine
 
 # SigNoz component versions
 SIGNOZ_BACKEND_VERSION=latest
@@ -1445,8 +1444,6 @@ SIGNOZ_SCHEMA_MIGRATOR_VERSION=latest
 <summary><b>File 2: `docker-compose.ha.yml` (IMPROVED)</b></summary>
 
 ```yaml
-version: "3.8"
-
 services:
   clickhouse-keeper-1:
     image: clickhouse/clickhouse-keeper:${CLICKHOUSE_KEEPER_VERSION}
