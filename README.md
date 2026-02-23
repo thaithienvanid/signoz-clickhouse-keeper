@@ -462,7 +462,7 @@ service:
 
         <!-- Enable Raft log and snapshot compression to reduce disk usage -->
         <compress_logs>true</compress_logs>
-        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
 
         <!-- Enable monitoring commands (mntr, srvr, stat, ruok, etc.) -->
         <four_letter_word_white_list>*</four_letter_word_white_list>
@@ -472,9 +472,9 @@ service:
             <session_timeout_ms>30000</session_timeout_ms>
             <raft_logs_level>warning</raft_logs_level>
 
-            <!-- Snapshot every 10,000 log entries; keep 10,000 reserved -->
-            <snapshot_distance>10000</snapshot_distance>
-            <reserved_log_items>10000</reserved_log_items>
+            <!-- Snapshot and log management -->
+            <snapshot_distance>100000</snapshot_distance>
+            <reserved_log_items>100000</reserved_log_items>
 
             <!-- Heartbeat and election tuning -->
             <heart_beat_interval_ms>500</heart_beat_interval_ms>
@@ -483,6 +483,11 @@ service:
 
             <!-- Session cleanup -->
             <dead_session_check_period_ms>500</dead_session_check_period_ms>
+
+            <!-- Data safety and performance -->
+            <force_sync>true</force_sync>
+            <async_replication>true</async_replication>
+            <startup_timeout>240000</startup_timeout>
         </coordination_settings>
 
         <raft_configuration>
@@ -1710,7 +1715,7 @@ volumes:
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
 
         <compress_logs>true</compress_logs>
-        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
         <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
@@ -1769,7 +1774,7 @@ volumes:
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
 
         <compress_logs>true</compress_logs>
-        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
         <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
@@ -1828,7 +1833,7 @@ volumes:
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
 
         <compress_logs>true</compress_logs>
-        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
         <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
