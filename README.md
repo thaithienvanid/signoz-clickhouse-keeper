@@ -241,6 +241,11 @@ x-common: &common
   networks:
     - signoz-net
   restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
 services:
   init-clickhouse:
     <<: *common
@@ -338,7 +343,7 @@ receivers:
         endpoint: 0.0.0.0:4318
         cors:
           allowed_origins:
-            - "*"
+            - "*"  # Restrict to specific domains in production
           allowed_headers:
             - "*"
 
@@ -477,14 +482,14 @@ scrape_configs:
 ### Step 3: Start the Stack
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Step 4: Verify Deployment
 
 **Check all services are healthy:**
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 Expected output - all services should show "Up" and "healthy":
@@ -532,22 +537,22 @@ curl -X POST http://localhost:4318/v1/traces \
 
 ```bash
 # View all logs
-docker-compose logs -f
+docker compose logs -f
 
 # View specific service logs
-docker-compose logs -f signoz
-docker-compose logs -f otel-collector
-docker-compose logs -f clickhouse
+docker compose logs -f signoz
+docker compose logs -f otel-collector
+docker compose logs -f clickhouse
 ```
 
 ### Step 6: Stop the Stack
 
 ```bash
 # Stop (preserves data)
-docker-compose down
+docker compose down
 
 # Stop and remove volumes (clean slate)
-docker-compose down -v
+docker compose down -v
 ```
 
 ---
@@ -804,7 +809,7 @@ otel-collector:
 **Step 5: Restart Services**
 
 ```bash
-docker-compose restart otel-collector
+docker compose restart otel-collector
 ```
 
 **Step 6: Test Authentication**
@@ -872,7 +877,7 @@ service:
 **Step 3: Restart Services**
 
 ```bash
-docker-compose restart otel-collector
+docker compose restart otel-collector
 ```
 
 **Step 4: Test Authentication**
@@ -908,7 +913,7 @@ mkdir -p certs && cd certs
 openssl genrsa -out ca-key.pem 4096
 
 # Generate CA certificate
-openssl req -new -x509 -days 3650 -key ca-key.pem -out ca-cert.pem \
+openssl req -new -x509 -days 365 -key ca-key.pem -out ca-cert.pem \
   -subj "/CN=SigNoz CA"
 
 # Generate server private key
@@ -919,7 +924,7 @@ openssl req -new -key server-key.pem -out server-csr.pem \
   -subj "/CN=localhost"
 
 # Sign server certificate
-openssl x509 -req -days 3650 -in server-csr.pem \
+openssl x509 -req -days 365 -in server-csr.pem \
   -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
   -out server-cert.pem
 
@@ -937,11 +942,13 @@ receivers:
         tls:
           cert_file: /etc/certs/server-cert.pem
           key_file: /etc/certs/server-key.pem
+          min_version: "1.2"
       http:
         endpoint: 0.0.0.0:4318
         tls:
           cert_file: /etc/certs/server-cert.pem
           key_file: /etc/certs/server-key.pem
+          min_version: "1.2"
         cors:
           allowed_origins: ["*"]
           allowed_headers: ["*"]
@@ -961,7 +968,7 @@ otel-collector:
 **Step 4: Restart Services**
 
 ```bash
-docker-compose restart otel-collector
+docker compose restart otel-collector
 ```
 
 **Step 5: Test TLS Connection**
@@ -992,7 +999,7 @@ openssl req -new -key client-key.pem -out client-csr.pem \
   -subj "/CN=signoz-client"
 
 # Sign client certificate
-openssl x509 -req -days 3650 -in client-csr.pem \
+openssl x509 -req -days 365 -in client-csr.pem \
   -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
   -out client-cert.pem
 
@@ -1012,6 +1019,7 @@ receivers:
           key_file: /etc/certs/server-key.pem
           client_ca_file: /etc/certs/ca-cert.pem
           client_ca_file_reload: true
+          min_version: "1.2"
       http:
         endpoint: 0.0.0.0:4318
         tls:
@@ -1019,6 +1027,7 @@ receivers:
           key_file: /etc/certs/server-key.pem
           client_ca_file: /etc/certs/ca-cert.pem
           client_ca_file_reload: true
+          min_version: "1.2"
         cors:
           allowed_origins: ["*"]
           allowed_headers: ["*"]
@@ -1444,8 +1453,16 @@ SIGNOZ_SCHEMA_MIGRATOR_VERSION=latest
 <summary><b>File 2: `docker-compose.ha.yml` (IMPROVED)</b></summary>
 
 ```yaml
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
 services:
   clickhouse-keeper-1:
+    <<: *default-logging
     image: clickhouse/clickhouse-keeper:${CLICKHOUSE_KEEPER_VERSION}
     container_name: signoz-keeper-1
     hostname: clickhouse-keeper-1
@@ -1910,13 +1927,13 @@ service:
 **Step 1: Start all services**
 
 ```bash
-docker-compose -f docker-compose.ha.yml up -d
+docker compose -f docker-compose.ha.yml up -d
 ```
 
 **Step 2: Check service health**
 
 ```bash
-docker-compose -f docker-compose.ha.yml ps
+docker compose -f docker-compose.ha.yml ps
 ```
 
 Expected output - all services should be "Up" and healthy:
@@ -1958,20 +1975,20 @@ docker exec signoz-clickhouse-1 clickhouse-client --query="SELECT * FROM system.
 
 ```bash
 # Stop one keeper node
-docker-compose -f docker-compose.ha.yml stop clickhouse-keeper-2
+docker compose -f docker-compose.ha.yml stop clickhouse-keeper-2
 
 # Verify cluster still works (needs 2 out of 3)
 docker exec signoz-clickhouse-1 clickhouse-client --query="SELECT 1"
 
 # Restore keeper
-docker-compose -f docker-compose.ha.yml start clickhouse-keeper-2
+docker compose -f docker-compose.ha.yml start clickhouse-keeper-2
 ```
 
 **Test 2: ClickHouse Node Failure**
 
 ```bash
 # Stop one ClickHouse node
-docker-compose -f docker-compose.ha.yml stop clickhouse-2
+docker compose -f docker-compose.ha.yml stop clickhouse-2
 
 # Verify UI still accessible
 curl http://localhost:8080/api/v1/version
@@ -1982,21 +1999,21 @@ curl -X POST http://localhost:4318/v1/traces \
   -d '{"resourceSpans":[]}'
 
 # Restore ClickHouse
-docker-compose -f docker-compose.ha.yml start clickhouse-2
+docker compose -f docker-compose.ha.yml start clickhouse-2
 ```
 
 **Test 3: Split Brain Prevention**
 
 ```bash
 # Stop 2 out of 3 keepers (quorum lost)
-docker-compose -f docker-compose.ha.yml stop clickhouse-keeper-2 clickhouse-keeper-3
+docker compose -f docker-compose.ha.yml stop clickhouse-keeper-2 clickhouse-keeper-3
 
 # Cluster should be read-only now
 docker exec signoz-clickhouse-1 clickhouse-client --query="CREATE TABLE test (id Int32) ENGINE=Memory"
 # Should fail: "Coordination::Exception: Session expired"
 
 # Restore quorum
-docker-compose -f docker-compose.ha.yml start clickhouse-keeper-2 clickhouse-keeper-3
+docker compose -f docker-compose.ha.yml start clickhouse-keeper-2 clickhouse-keeper-3
 ```
 
 ---
@@ -2107,7 +2124,7 @@ This section covers day-to-day operations, maintenance procedures, and troublesh
 
 ```bash
 # Check service status
-docker-compose ps
+docker compose ps
 
 # Monitor resource usage
 docker stats
@@ -2191,7 +2208,7 @@ git push
 
 ```bash
 # Stop services
-docker-compose down
+docker compose down
 
 # Backup volumes
 docker run --rm \
@@ -2200,7 +2217,7 @@ docker run --rm \
   alpine tar czf /backup/clickhouse-backup-$(date +%Y%m%d).tar.gz -C /data .
 
 # Restart services
-docker-compose up -d
+docker compose up -d
 ```
 
 **Method 2: ClickHouse Native Backup (Online)**
@@ -2251,7 +2268,7 @@ clickhouse-backup upload backup-$(date +%Y%m%d-%H%M%S)
 
 ```bash
 # Stop services
-docker-compose down
+docker compose down
 
 # Remove old data
 docker volume rm signoz-standalone_clickhouse-data
@@ -2266,7 +2283,7 @@ docker run --rm \
   alpine tar xzf /backup/clickhouse-backup-20250109.tar.gz -C /data
 
 # Restart services
-docker-compose up -d
+docker compose up -d
 ```
 
 **Restore from ClickHouse backup:**
@@ -2332,8 +2349,8 @@ Update `cluster-ha.xml` to include additional shards/replicas, then add services
 
 ```bash
 # Check logs
-docker-compose logs clickhouse
-docker-compose logs otel-collector
+docker compose logs clickhouse
+docker compose logs otel-collector
 
 # Common causes:
 # - Port conflicts (already in use)
@@ -2386,7 +2403,7 @@ docker exec signoz-clickhouse clickhouse-client --query="
 "
 
 # Check SigNoz backend logs
-docker-compose logs signoz | tail -100
+docker compose logs signoz | tail -100
 ```
 
 **Issue 5: Keeper Quorum Lost**
@@ -2396,7 +2413,7 @@ docker-compose logs signoz | tail -100
 docker exec signoz-keeper-1 clickhouse-keeper-client -h localhost -p 9181 -q "ruok"
 
 # If quorum lost, restart all keeper nodes simultaneously
-docker-compose -f docker-compose.ha.yml restart clickhouse-keeper-1 clickhouse-keeper-2 clickhouse-keeper-3
+docker compose -f docker-compose.ha.yml restart clickhouse-keeper-1 clickhouse-keeper-2 clickhouse-keeper-3
 ```
 
 ---
