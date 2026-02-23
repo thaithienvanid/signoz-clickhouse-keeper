@@ -334,6 +334,14 @@ volumes:
 #### File 3: `otel-collector-config.yaml` - Telemetry Gateway Configuration
 
 ```yaml
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
 receivers:
   otlp:
     protocols:
@@ -348,6 +356,11 @@ receivers:
             - "*"
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 4000
+    spike_limit_mib: 800
+
   batch:
     send_batch_size: 10000
     send_batch_max_size: 11000
@@ -366,33 +379,58 @@ exporters:
   clickhousetraces:
     datasource: tcp://clickhouse:9000/?database=signoz_traces
     low_cardinal_exception_grouping: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
 
   clickhousemetricswrite:
     endpoint: tcp://clickhouse:9000/?database=signoz_metrics
     resource_to_telemetry_conversion:
       enabled: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
 
   clickhouselogsexporter:
     dsn: tcp://clickhouse:9000/?database=signoz_logs
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
 
   prometheus:
     endpoint: 0.0.0.0:8889
 
 service:
+  extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [signozspanmetrics/prometheus, batch, resourcedetection]
+      processors: [memory_limiter, signozspanmetrics/prometheus, batch, resourcedetection]
       exporters: [clickhousetraces]
-    
+
     metrics:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
+      processors: [memory_limiter, batch, resourcedetection]
       exporters: [clickhousemetricswrite]
-    
+
     logs:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
+      processors: [memory_limiter, batch, resourcedetection]
       exporters: [clickhouselogsexporter]
 ```
 
@@ -410,14 +448,33 @@ service:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>1</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <!-- Enable Raft log and snapshot compression to reduce disk usage -->
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+
+        <!-- Enable monitoring commands (mntr, srvr, stat, ruok, etc.) -->
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+
+            <!-- Snapshot every 10,000 log entries; keep 10,000 reserved -->
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+
+            <!-- Heartbeat and election tuning -->
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+
+            <!-- Session cleanup -->
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -442,15 +499,21 @@ service:
         </node>
         <session_timeout_ms>30000</session_timeout_ms>
         <operation_timeout_ms>10000</operation_timeout_ms>
+        <!-- Timeout for establishing connection to Keeper -->
+        <connection_timeout_ms>10000</connection_timeout_ms>
     </zookeeper>
 
     <distributed_ddl>
         <path>/clickhouse/task_queue/ddl</path>
+        <!-- Auto-cleanup completed DDL tasks after 7 days -->
+        <cleanup_delay_period>604800</cleanup_delay_period>
+        <task_max_lifetime>604800</task_max_lifetime>
     </distributed_ddl>
 
     <remote_servers>
         <cluster_1S_1R>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse</host>
                     <port>9000</port>
@@ -464,7 +527,7 @@ service:
 #### File 6: `signoz-prometheus.yml` - SigNoz Backend Configuration
 
 ```yaml
-# Minimal configuration for SigNoz backend
+# SigNoz backend Prometheus scrape configuration
 # Additional settings can be configured via environment variables
 
 global:
@@ -473,8 +536,14 @@ global:
 
 scrape_configs:
   - job_name: 'otel-collector'
+    scrape_timeout: 10s
     static_configs:
       - targets: ['otel-collector:8889']
+    metric_relabel_configs:
+      # Keep only essential collector metrics to reduce storage
+      - source_labels: [__name__]
+        regex: 'otelcol_(receiver|exporter|processor)_.*'
+        action: keep
 ```
 
 </details>
@@ -1628,14 +1697,24 @@ volumes:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>1</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -1677,14 +1756,24 @@ volumes:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>2</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -1726,14 +1815,24 @@ volumes:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>3</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_level>3</compress_snapshots_with_zstd_level>
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -1781,11 +1880,14 @@ volumes:
         </node>
         <session_timeout_ms>30000</session_timeout_ms>
         <operation_timeout_ms>10000</operation_timeout_ms>
+        <connection_timeout_ms>10000</connection_timeout_ms>
     </zookeeper>
 
     <!-- Distributed DDL Configuration -->
     <distributed_ddl>
         <path>/clickhouse/task_queue/ddl</path>
+        <cleanup_delay_period>604800</cleanup_delay_period>
+        <task_max_lifetime>604800</task_max_lifetime>
     </distributed_ddl>
 
     <!-- Remote Servers (Cluster Topology) -->
@@ -1793,6 +1895,7 @@ volumes:
         <!-- 3 shards, 2 replicas each for high availability -->
         <cluster_3S_2R>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-1</host>
                     <port>9000</port>
@@ -1803,6 +1906,7 @@ volumes:
                 </replica>
             </shard>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-2</host>
                     <port>9000</port>
@@ -1813,6 +1917,7 @@ volumes:
                 </replica>
             </shard>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-3</host>
                     <port>9000</port>
@@ -1827,6 +1932,7 @@ volumes:
         <!-- Single shard with 3 replicas (simpler HA) -->
         <cluster_1S_3R>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-1</host>
                     <port>9000</port>
@@ -1843,7 +1949,8 @@ volumes:
         </cluster_1S_3R>
     </remote_servers>
 
-    <!-- Macros for replica identification -->
+    <!-- Macros for replica identification (must be unique per node!) -->
+    <!-- Override this file per node: shard=01/02/03, replica=replica_1/replica_2/replica_3 -->
     <macros>
         <shard>01</shard>
         <replica>replica_1</replica>
@@ -1858,6 +1965,14 @@ volumes:
 <summary><b>Click to expand otel-collector-ha.yaml</b></summary>
 
 ```yaml
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
 receivers:
   otlp:
     protocols:
@@ -1866,10 +1981,15 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
         cors:
-          allowed_origins: ["*"]
+          allowed_origins: ["*"]  # Restrict to specific domains in production
           allowed_headers: ["*"]
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 4000
+    spike_limit_mib: 800
+
   batch:
     send_batch_size: 10000
     send_batch_max_size: 11000
@@ -1889,33 +2009,58 @@ exporters:
   clickhousetraces:
     datasource: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_traces
     low_cardinal_exception_grouping: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 5000
 
   clickhousemetricswrite:
     endpoint: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_metrics
     resource_to_telemetry_conversion:
       enabled: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 5000
 
   clickhouselogsexporter:
     dsn: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_logs
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 5000
 
   prometheus:
     endpoint: 0.0.0.0:8889
 
 service:
+  extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [signozspanmetrics/prometheus, batch, resourcedetection]
+      processors: [memory_limiter, signozspanmetrics/prometheus, batch, resourcedetection]
       exporters: [clickhousetraces]
-    
+
     metrics:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
+      processors: [memory_limiter, batch, resourcedetection]
       exporters: [clickhousemetricswrite]
-    
+
     logs:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
+      processors: [memory_limiter, batch, resourcedetection]
       exporters: [clickhouselogsexporter]
 ```
 </details>
