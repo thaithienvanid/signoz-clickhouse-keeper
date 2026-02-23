@@ -347,6 +347,14 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 16
+        keepalive:
+          server_parameters:
+            max_connection_idle: 60s
+            max_connection_age: 300s
+            max_connection_age_grace: 30s
+            time: 120s
+            timeout: 20s
       http:
         endpoint: 0.0.0.0:4318
         cors:
@@ -356,6 +364,7 @@ receivers:
             - "*"
 
 processors:
+  # memory_limiter must be the first processor in the pipeline
   memory_limiter:
     check_interval: 1s
     limit_mib: 4000
@@ -370,10 +379,11 @@ processors:
     detectors: [env, system, docker]
     timeout: 2s
 
-  signozspanmetrics/prometheus:
-    metrics_exporter: prometheus
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
     latency_histogram_buckets: [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s]
-    dimensions_cache_size: 10000
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
 
 exporters:
   clickhousetraces:
@@ -388,10 +398,8 @@ exporters:
       enabled: true
       queue_size: 1000
 
-  clickhousemetricswrite:
+  signozclickhousemetrics:
     endpoint: tcp://clickhouse:9000/?database=signoz_metrics
-    resource_to_telemetry_conversion:
-      enabled: true
     retry_on_failure:
       enabled: true
       initial_interval: 5s
@@ -420,17 +428,17 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, signozspanmetrics/prometheus, batch, resourcedetection]
+      processors: [memory_limiter, signozspanmetrics/delta, resourcedetection, batch]
       exporters: [clickhousetraces]
 
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection]
-      exporters: [clickhousemetricswrite]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [signozclickhousemetrics]
 
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection]
+      processors: [memory_limiter, resourcedetection, batch]
       exporters: [clickhouselogsexporter]
 ```
 
@@ -1978,6 +1986,14 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 16
+        keepalive:
+          server_parameters:
+            max_connection_idle: 60s
+            max_connection_age: 300s
+            max_connection_age_grace: 30s
+            time: 120s
+            timeout: 20s
       http:
         endpoint: 0.0.0.0:4318
         cors:
@@ -1999,10 +2015,11 @@ processors:
     detectors: [env, system, docker]
     timeout: 2s
 
-  signozspanmetrics/prometheus:
-    metrics_exporter: prometheus
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
     latency_histogram_buckets: [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s]
-    dimensions_cache_size: 10000
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
 
 exporters:
   # Write to all ClickHouse nodes for redundancy
@@ -2018,10 +2035,8 @@ exporters:
       enabled: true
       queue_size: 5000
 
-  clickhousemetricswrite:
+  signozclickhousemetrics:
     endpoint: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_metrics
-    resource_to_telemetry_conversion:
-      enabled: true
     retry_on_failure:
       enabled: true
       initial_interval: 5s
@@ -2050,17 +2065,17 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, signozspanmetrics/prometheus, batch, resourcedetection]
+      processors: [memory_limiter, signozspanmetrics/delta, resourcedetection, batch]
       exporters: [clickhousetraces]
 
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection]
-      exporters: [clickhousemetricswrite]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [signozclickhousemetrics]
 
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection]
+      processors: [memory_limiter, resourcedetection, batch]
       exporters: [clickhouselogsexporter]
 ```
 </details>
