@@ -188,9 +188,9 @@ graph TB
 
 ### Software Requirements
 
-- **Docker**: 20.10.0+ ([Install Guide](https://docs.docker.com/engine/install/))
-- **Docker Compose**: 2.0.0+ (usually bundled with Docker Desktop)
-- **Operating System**: Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+) or macOS
+- **Docker**: 25.0.0+ ([Install Guide](https://docs.docker.com/engine/install/))
+- **Docker Compose**: 5.0.0+ (usually bundled with Docker Desktop)
+- **Operating System**: Linux (Ubuntu 22.04+, Debian 12+, RHEL 9+) or macOS
 
 ### Network Ports
 
@@ -225,8 +225,8 @@ You need **6 configuration files**. Copy and paste each one exactly as shown.
 # Update these to change versions across all services
 
 # ClickHouse versions (server and keeper must be compatible)
-CLICKHOUSE_VERSION=25.5.6
-CLICKHOUSE_KEEPER_VERSION=25.5.6-alpine
+CLICKHOUSE_VERSION=26.1.3.52
+CLICKHOUSE_KEEPER_VERSION=26.1.3.52-alpine
 
 # SigNoz versions (use 'latest' for testing, pin versions for production)
 SIGNOZ_VERSION=latest
@@ -237,11 +237,15 @@ SCHEMA_MIGRATOR_VERSION=latest
 #### File 2: `docker-compose.yml` - Service Orchestration
 
 ```yaml
-version: "3.8"
 x-common: &common
   networks:
     - signoz-net
   restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
 services:
   init-clickhouse:
     <<: *common
@@ -330,20 +334,42 @@ volumes:
 #### File 3: `otel-collector-config.yaml` - Telemetry Gateway Configuration
 
 ```yaml
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 16
+        keepalive:
+          server_parameters:
+            max_connection_idle: 60s
+            max_connection_age: 300s
+            max_connection_age_grace: 30s
+            time: 120s
+            timeout: 20s
       http:
         endpoint: 0.0.0.0:4318
         cors:
           allowed_origins:
-            - "*"
+            - "*"  # Restrict to specific domains in production
           allowed_headers:
             - "*"
 
 processors:
+  # memory_limiter must be the first processor in the pipeline
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 4000
+    spike_limit_mib: 800
+
   batch:
     send_batch_size: 10000
     send_batch_max_size: 11000
@@ -353,42 +379,66 @@ processors:
     detectors: [env, system, docker]
     timeout: 2s
 
-  signozspanmetrics/prometheus:
-    metrics_exporter: prometheus
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
     latency_histogram_buckets: [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s]
-    dimensions_cache_size: 10000
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
 
 exporters:
   clickhousetraces:
     datasource: tcp://clickhouse:9000/?database=signoz_traces
     low_cardinal_exception_grouping: true
-
-  clickhousemetricswrite:
-    endpoint: tcp://clickhouse:9000/?database=signoz_metrics
-    resource_to_telemetry_conversion:
+    retry_on_failure:
       enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+  signozclickhousemetrics:
+    endpoint: tcp://clickhouse:9000/?database=signoz_metrics
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
 
   clickhouselogsexporter:
     dsn: tcp://clickhouse:9000/?database=signoz_logs
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
 
   prometheus:
     endpoint: 0.0.0.0:8889
 
 service:
+  extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [signozspanmetrics/prometheus, batch, resourcedetection]
+      processors: [memory_limiter, signozspanmetrics/delta, resourcedetection, batch]
       exporters: [clickhousetraces]
-    
+
     metrics:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
-      exporters: [clickhousemetricswrite]
-    
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [signozclickhousemetrics]
+
     logs:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
+      processors: [memory_limiter, resourcedetection, batch]
       exporters: [clickhouselogsexporter]
 ```
 
@@ -406,14 +456,38 @@ service:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>1</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <!-- Enable Raft log and snapshot compression to reduce disk usage -->
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
+
+        <!-- Enable monitoring commands (mntr, srvr, stat, ruok, etc.) -->
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+
+            <!-- Snapshot and log management -->
+            <snapshot_distance>100000</snapshot_distance>
+            <reserved_log_items>100000</reserved_log_items>
+
+            <!-- Heartbeat and election tuning -->
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+
+            <!-- Session cleanup -->
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
+
+            <!-- Data safety and performance -->
+            <force_sync>true</force_sync>
+            <async_replication>true</async_replication>
+            <startup_timeout>240000</startup_timeout>
         </coordination_settings>
 
         <raft_configuration>
@@ -438,15 +512,21 @@ service:
         </node>
         <session_timeout_ms>30000</session_timeout_ms>
         <operation_timeout_ms>10000</operation_timeout_ms>
+        <!-- Timeout for establishing connection to Keeper -->
+        <connection_timeout_ms>10000</connection_timeout_ms>
     </zookeeper>
 
     <distributed_ddl>
         <path>/clickhouse/task_queue/ddl</path>
+        <!-- Auto-cleanup completed DDL tasks after 7 days -->
+        <cleanup_delay_period>604800</cleanup_delay_period>
+        <task_max_lifetime>604800</task_max_lifetime>
     </distributed_ddl>
 
     <remote_servers>
         <cluster_1S_1R>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse</host>
                     <port>9000</port>
@@ -460,7 +540,7 @@ service:
 #### File 6: `signoz-prometheus.yml` - SigNoz Backend Configuration
 
 ```yaml
-# Minimal configuration for SigNoz backend
+# SigNoz backend Prometheus scrape configuration
 # Additional settings can be configured via environment variables
 
 global:
@@ -469,8 +549,14 @@ global:
 
 scrape_configs:
   - job_name: 'otel-collector'
+    scrape_timeout: 10s
     static_configs:
       - targets: ['otel-collector:8889']
+    metric_relabel_configs:
+      # Keep only essential collector metrics to reduce storage
+      - source_labels: [__name__]
+        regex: 'otelcol_(receiver|exporter|processor)_.*'
+        action: keep
 ```
 
 </details>
@@ -478,14 +564,14 @@ scrape_configs:
 ### Step 3: Start the Stack
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Step 4: Verify Deployment
 
 **Check all services are healthy:**
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 Expected output - all services should show "Up" and "healthy":
@@ -533,22 +619,22 @@ curl -X POST http://localhost:4318/v1/traces \
 
 ```bash
 # View all logs
-docker-compose logs -f
+docker compose logs -f
 
 # View specific service logs
-docker-compose logs -f signoz
-docker-compose logs -f otel-collector
-docker-compose logs -f clickhouse
+docker compose logs -f signoz
+docker compose logs -f otel-collector
+docker compose logs -f clickhouse
 ```
 
 ### Step 6: Stop the Stack
 
 ```bash
 # Stop (preserves data)
-docker-compose down
+docker compose down
 
 # Stop and remove volumes (clean slate)
-docker-compose down -v
+docker compose down -v
 ```
 
 ---
@@ -805,7 +891,7 @@ otel-collector:
 **Step 5: Restart Services**
 
 ```bash
-docker-compose restart otel-collector
+docker compose restart otel-collector
 ```
 
 **Step 6: Test Authentication**
@@ -873,7 +959,7 @@ service:
 **Step 3: Restart Services**
 
 ```bash
-docker-compose restart otel-collector
+docker compose restart otel-collector
 ```
 
 **Step 4: Test Authentication**
@@ -909,7 +995,7 @@ mkdir -p certs && cd certs
 openssl genrsa -out ca-key.pem 4096
 
 # Generate CA certificate
-openssl req -new -x509 -days 3650 -key ca-key.pem -out ca-cert.pem \
+openssl req -new -x509 -days 365 -key ca-key.pem -out ca-cert.pem \
   -subj "/CN=SigNoz CA"
 
 # Generate server private key
@@ -920,7 +1006,7 @@ openssl req -new -key server-key.pem -out server-csr.pem \
   -subj "/CN=localhost"
 
 # Sign server certificate
-openssl x509 -req -days 3650 -in server-csr.pem \
+openssl x509 -req -days 365 -in server-csr.pem \
   -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
   -out server-cert.pem
 
@@ -938,11 +1024,13 @@ receivers:
         tls:
           cert_file: /etc/certs/server-cert.pem
           key_file: /etc/certs/server-key.pem
+          min_version: "1.2"
       http:
         endpoint: 0.0.0.0:4318
         tls:
           cert_file: /etc/certs/server-cert.pem
           key_file: /etc/certs/server-key.pem
+          min_version: "1.2"
         cors:
           allowed_origins: ["*"]
           allowed_headers: ["*"]
@@ -962,7 +1050,7 @@ otel-collector:
 **Step 4: Restart Services**
 
 ```bash
-docker-compose restart otel-collector
+docker compose restart otel-collector
 ```
 
 **Step 5: Test TLS Connection**
@@ -993,7 +1081,7 @@ openssl req -new -key client-key.pem -out client-csr.pem \
   -subj "/CN=signoz-client"
 
 # Sign client certificate
-openssl x509 -req -days 3650 -in client-csr.pem \
+openssl x509 -req -days 365 -in client-csr.pem \
   -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial \
   -out client-cert.pem
 
@@ -1013,6 +1101,7 @@ receivers:
           key_file: /etc/certs/server-key.pem
           client_ca_file: /etc/certs/ca-cert.pem
           client_ca_file_reload: true
+          min_version: "1.2"
       http:
         endpoint: 0.0.0.0:4318
         tls:
@@ -1020,6 +1109,7 @@ receivers:
           key_file: /etc/certs/server-key.pem
           client_ca_file: /etc/certs/ca-cert.pem
           client_ca_file_reload: true
+          min_version: "1.2"
         cors:
           allowed_origins: ["*"]
           allowed_headers: ["*"]
@@ -1431,8 +1521,8 @@ Create a new directory (e.g., `signoz-ha`) and place the following files inside 
 # It's recommended to use specific, stable versions for production.
 
 # ClickHouse and ClickHouse Keeper versions
-CLICKHOUSE_VERSION=25.5.6
-CLICKHOUSE_KEEPER_VERSION=25.5.6-alpine
+CLICKHOUSE_VERSION=26.1.3.52
+CLICKHOUSE_KEEPER_VERSION=26.1.3.52-alpine
 
 # SigNoz component versions
 SIGNOZ_BACKEND_VERSION=latest
@@ -1445,10 +1535,16 @@ SIGNOZ_SCHEMA_MIGRATOR_VERSION=latest
 <summary><b>File 2: `docker-compose.ha.yml` (IMPROVED)</b></summary>
 
 ```yaml
-version: "3.8"
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
 
 services:
   clickhouse-keeper-1:
+    <<: *default-logging
     image: clickhouse/clickhouse-keeper:${CLICKHOUSE_KEEPER_VERSION}
     container_name: signoz-keeper-1
     hostname: clickhouse-keeper-1
@@ -1614,14 +1710,24 @@ volumes:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>1</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -1663,14 +1769,24 @@ volumes:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>2</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -1712,14 +1828,24 @@ volumes:
     <keeper_server>
         <tcp_port>9181</tcp_port>
         <server_id>3</server_id>
-        
+
         <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <compress_logs>true</compress_logs>
+        <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
+        <four_letter_word_white_list>*</four_letter_word_white_list>
 
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <raft_logs_level>information</raft_logs_level>
+            <raft_logs_level>warning</raft_logs_level>
+            <snapshot_distance>10000</snapshot_distance>
+            <reserved_log_items>10000</reserved_log_items>
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
         </coordination_settings>
 
         <raft_configuration>
@@ -1767,11 +1893,14 @@ volumes:
         </node>
         <session_timeout_ms>30000</session_timeout_ms>
         <operation_timeout_ms>10000</operation_timeout_ms>
+        <connection_timeout_ms>10000</connection_timeout_ms>
     </zookeeper>
 
     <!-- Distributed DDL Configuration -->
     <distributed_ddl>
         <path>/clickhouse/task_queue/ddl</path>
+        <cleanup_delay_period>604800</cleanup_delay_period>
+        <task_max_lifetime>604800</task_max_lifetime>
     </distributed_ddl>
 
     <!-- Remote Servers (Cluster Topology) -->
@@ -1779,6 +1908,7 @@ volumes:
         <!-- 3 shards, 2 replicas each for high availability -->
         <cluster_3S_2R>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-1</host>
                     <port>9000</port>
@@ -1789,6 +1919,7 @@ volumes:
                 </replica>
             </shard>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-2</host>
                     <port>9000</port>
@@ -1799,6 +1930,7 @@ volumes:
                 </replica>
             </shard>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-3</host>
                     <port>9000</port>
@@ -1813,6 +1945,7 @@ volumes:
         <!-- Single shard with 3 replicas (simpler HA) -->
         <cluster_1S_3R>
             <shard>
+                <internal_replication>true</internal_replication>
                 <replica>
                     <host>clickhouse-1</host>
                     <port>9000</port>
@@ -1829,7 +1962,8 @@ volumes:
         </cluster_1S_3R>
     </remote_servers>
 
-    <!-- Macros for replica identification -->
+    <!-- Macros for replica identification (must be unique per node!) -->
+    <!-- Override this file per node: shard=01/02/03, replica=replica_1/replica_2/replica_3 -->
     <macros>
         <shard>01</shard>
         <replica>replica_1</replica>
@@ -1844,18 +1978,39 @@ volumes:
 <summary><b>Click to expand otel-collector-ha.yaml</b></summary>
 
 ```yaml
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
 receivers:
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 16
+        keepalive:
+          server_parameters:
+            max_connection_idle: 60s
+            max_connection_age: 300s
+            max_connection_age_grace: 30s
+            time: 120s
+            timeout: 20s
       http:
         endpoint: 0.0.0.0:4318
         cors:
-          allowed_origins: ["*"]
+          allowed_origins: ["*"]  # Restrict to specific domains in production
           allowed_headers: ["*"]
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 4000
+    spike_limit_mib: 800
+
   batch:
     send_batch_size: 10000
     send_batch_max_size: 11000
@@ -1865,43 +2020,67 @@ processors:
     detectors: [env, system, docker]
     timeout: 2s
 
-  signozspanmetrics/prometheus:
-    metrics_exporter: prometheus
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
     latency_histogram_buckets: [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s]
-    dimensions_cache_size: 10000
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
 
 exporters:
   # Write to all ClickHouse nodes for redundancy
   clickhousetraces:
     datasource: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_traces
     low_cardinal_exception_grouping: true
-
-  clickhousemetricswrite:
-    endpoint: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_metrics
-    resource_to_telemetry_conversion:
+    retry_on_failure:
       enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+
+  signozclickhousemetrics:
+    endpoint: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_metrics
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 5000
 
   clickhouselogsexporter:
     dsn: tcp://clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000/?database=signoz_logs
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 5000
 
   prometheus:
     endpoint: 0.0.0.0:8889
 
 service:
+  extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [signozspanmetrics/prometheus, batch, resourcedetection]
+      processors: [memory_limiter, signozspanmetrics/delta, resourcedetection, batch]
       exporters: [clickhousetraces]
-    
+
     metrics:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
-      exporters: [clickhousemetricswrite]
-    
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [signozclickhousemetrics]
+
     logs:
       receivers: [otlp]
-      processors: [batch, resourcedetection]
+      processors: [memory_limiter, resourcedetection, batch]
       exporters: [clickhouselogsexporter]
 ```
 </details>
@@ -1913,13 +2092,13 @@ service:
 **Step 1: Start all services**
 
 ```bash
-docker-compose -f docker-compose.ha.yml up -d
+docker compose -f docker-compose.ha.yml up -d
 ```
 
 **Step 2: Check service health**
 
 ```bash
-docker-compose -f docker-compose.ha.yml ps
+docker compose -f docker-compose.ha.yml ps
 ```
 
 Expected output - all services should be "Up" and healthy:
@@ -1961,20 +2140,20 @@ docker exec signoz-clickhouse-1 clickhouse-client --query="SELECT * FROM system.
 
 ```bash
 # Stop one keeper node
-docker-compose -f docker-compose.ha.yml stop clickhouse-keeper-2
+docker compose -f docker-compose.ha.yml stop clickhouse-keeper-2
 
 # Verify cluster still works (needs 2 out of 3)
 docker exec signoz-clickhouse-1 clickhouse-client --query="SELECT 1"
 
 # Restore keeper
-docker-compose -f docker-compose.ha.yml start clickhouse-keeper-2
+docker compose -f docker-compose.ha.yml start clickhouse-keeper-2
 ```
 
 **Test 2: ClickHouse Node Failure**
 
 ```bash
 # Stop one ClickHouse node
-docker-compose -f docker-compose.ha.yml stop clickhouse-2
+docker compose -f docker-compose.ha.yml stop clickhouse-2
 
 # Verify UI still accessible
 curl http://localhost:8080/api/v1/version
@@ -1985,21 +2164,21 @@ curl -X POST http://localhost:4318/v1/traces \
   -d '{"resourceSpans":[]}'
 
 # Restore ClickHouse
-docker-compose -f docker-compose.ha.yml start clickhouse-2
+docker compose -f docker-compose.ha.yml start clickhouse-2
 ```
 
 **Test 3: Split Brain Prevention**
 
 ```bash
 # Stop 2 out of 3 keepers (quorum lost)
-docker-compose -f docker-compose.ha.yml stop clickhouse-keeper-2 clickhouse-keeper-3
+docker compose -f docker-compose.ha.yml stop clickhouse-keeper-2 clickhouse-keeper-3
 
 # Cluster should be read-only now
 docker exec signoz-clickhouse-1 clickhouse-client --query="CREATE TABLE test (id Int32) ENGINE=Memory"
 # Should fail: "Coordination::Exception: Session expired"
 
 # Restore quorum
-docker-compose -f docker-compose.ha.yml start clickhouse-keeper-2 clickhouse-keeper-3
+docker compose -f docker-compose.ha.yml start clickhouse-keeper-2 clickhouse-keeper-3
 ```
 
 ---
@@ -2110,7 +2289,7 @@ This section covers day-to-day operations, maintenance procedures, and troublesh
 
 ```bash
 # Check service status
-docker-compose ps
+docker compose ps
 
 # Monitor resource usage
 docker stats
@@ -2194,7 +2373,7 @@ git push
 
 ```bash
 # Stop services
-docker-compose down
+docker compose down
 
 # Backup volumes
 docker run --rm \
@@ -2203,7 +2382,7 @@ docker run --rm \
   alpine tar czf /backup/clickhouse-backup-$(date +%Y%m%d).tar.gz -C /data .
 
 # Restart services
-docker-compose up -d
+docker compose up -d
 ```
 
 **Method 2: ClickHouse Native Backup (Online)**
@@ -2254,7 +2433,7 @@ clickhouse-backup upload backup-$(date +%Y%m%d-%H%M%S)
 
 ```bash
 # Stop services
-docker-compose down
+docker compose down
 
 # Remove old data
 docker volume rm signoz-standalone_clickhouse-data
@@ -2269,7 +2448,7 @@ docker run --rm \
   alpine tar xzf /backup/clickhouse-backup-20250109.tar.gz -C /data
 
 # Restart services
-docker-compose up -d
+docker compose up -d
 ```
 
 **Restore from ClickHouse backup:**
@@ -2335,8 +2514,8 @@ Update `cluster-ha.xml` to include additional shards/replicas, then add services
 
 ```bash
 # Check logs
-docker-compose logs clickhouse
-docker-compose logs otel-collector
+docker compose logs clickhouse
+docker compose logs otel-collector
 
 # Common causes:
 # - Port conflicts (already in use)
@@ -2389,7 +2568,7 @@ docker exec signoz-clickhouse clickhouse-client --query="
 "
 
 # Check SigNoz backend logs
-docker-compose logs signoz | tail -100
+docker compose logs signoz | tail -100
 ```
 
 **Issue 5: Keeper Quorum Lost**
@@ -2399,7 +2578,7 @@ docker-compose logs signoz | tail -100
 docker exec signoz-keeper-1 clickhouse-keeper-client -h localhost -p 9181 -q "ruok"
 
 # If quorum lost, restart all keeper nodes simultaneously
-docker-compose -f docker-compose.ha.yml restart clickhouse-keeper-1 clickhouse-keeper-2 clickhouse-keeper-3
+docker compose -f docker-compose.ha.yml restart clickhouse-keeper-1 clickhouse-keeper-2 clickhouse-keeper-3
 ```
 
 ---
