@@ -98,20 +98,38 @@ head_ "ingestion"
 
 # A collector started with --manager-config begins in no-op mode: every
 # receiver is swapped for a nop receiver until the OpAMP server pushes it a
-# config. The container reports healthy the whole time. So a refused OTLP
-# connection almost always means SigNoz has no organization yet, not that the
-# stack is broken — say so rather than letting three POSTs fail with 000.
-otlp_host="$(printf '%s' "$OTLP_ENDPOINT" | sed -E 's#^[a-z]+://##; s#/.*$##; s#:.*$##')"
-otlp_port="$(printf '%s' "$OTLP_ENDPOINT" | sed -E 's#^[a-z]+://##; s#/.*$##' | awk -F: 'NF>1{print $2; exit} {print "4318"}')"
-if ! (exec 3<>"/dev/tcp/${otlp_host}/${otlp_port}") 2>/dev/null; then
-    fail "OTLP endpoint ${otlp_host}:${otlp_port} is not accepting connections"
-    echo "        The collector is probably still in no-op mode, which it stays in"
-    echo "        until SigNoz has an organization. Create one, then re-run:"
+# config, which it only does once an organization exists. It then picks that up
+# on its next poll, up to 30s later.
+#
+# Probe with a real OTLP request, not a TCP connect. Docker publishes the port
+# the moment the container starts and docker-proxy accepts connections on it
+# whether or not anything is listening inside, so a successful TCP handshake
+# proves nothing at all here.
+echo "  waiting for the OTLP receiver to accept requests..."
+otlp_ready=false
+for _ in $(seq 1 24); do
+    if [ "$(post_otlp /v1/traces '{"resourceSpans":[]}')" = "200" ]; then
+        otlp_ready=true
+        break
+    fi
+    sleep 5
+done
+
+if [ "$otlp_ready" != true ]; then
+    fail "OTLP receiver never accepted a request (120s)"
+    echo "        The collector is almost certainly still in no-op mode, which it"
+    echo "        stays in until SigNoz has an organization:"
     echo "            scripts/bootstrap.sh ${STACK}"
+    echo "        Note the container reports healthy in this state by design."
     echo
     printf '\033[31m%d check(s) failed\033[0m\n' "$FAILURES"
     exit 1
 fi
+pass "OTLP receiver is accepting requests"
+
+# Re-stamp now that the wait is over, so the span carries a current timestamp
+# rather than one from up to two minutes ago.
+NOW_NS="$(date +%s)000000000"
 
 trace_body=$(cat <<JSON
 {"resourceSpans":[{"resource":{"attributes":[

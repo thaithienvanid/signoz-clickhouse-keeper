@@ -95,19 +95,27 @@ case "$code" in
 esac
 
 # The collector only leaves no-op mode once the server pushes it a config,
-# which happens on its next OpAMP poll. Wait for the OTLP port to start
-# accepting so callers know ingestion is actually live.
-OTLP_HOST="${OTLP_HOST:-localhost}"
-OTLP_PORT="${OTLP_PORT:-4318}"
-echo "waiting for the collector to leave no-op mode and open ${OTLP_HOST}:${OTLP_PORT} ..."
-for _ in $(seq 1 30); do
-    if (exec 3<>"/dev/tcp/${OTLP_HOST}/${OTLP_PORT}") 2>/dev/null; then
-        echo "OTLP endpoint is accepting connections — ingestion is live"
+# which happens on its next OpAMP poll — up to 30s away. Wait for that, so
+# callers know ingestion is actually live before they send anything.
+#
+# This has to be a real OTLP request. Docker publishes the port as soon as the
+# container starts and docker-proxy accepts connections on it whether or not
+# anything is listening inside, so a TCP handshake succeeds even in no-op mode
+# and tells you nothing.
+OTLP_ENDPOINT="${OTLP_ENDPOINT:-http://localhost:4318}"
+echo "waiting for the collector to leave no-op mode (${OTLP_ENDPOINT}) ..."
+for _ in $(seq 1 24); do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+        -X POST "${OTLP_ENDPOINT}/v1/traces" \
+        -H 'Content-Type: application/json' \
+        --data-binary '{"resourceSpans":[]}' 2>/dev/null)
+    if [ "$code" = "200" ]; then
+        echo "OTLP receiver is accepting requests — ingestion is live"
         exit 0
     fi
     sleep 5
 done
 
-echo "warning: ${OTLP_HOST}:${OTLP_PORT} is still closed after 150s." >&2
+echo "warning: the OTLP receiver is still not accepting requests after 120s." >&2
 echo "The collector polls OpAMP every 30s; check 'docker compose logs otel-collector'." >&2
 exit 1
