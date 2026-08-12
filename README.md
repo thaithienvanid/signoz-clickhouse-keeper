@@ -161,9 +161,16 @@ See [docs/upgrading.md](docs/upgrading.md) for the upgrade procedure.
 make init                     # writes deploy/standalone/.env from the example
 $EDITOR deploy/standalone/.env    # set CLICKHOUSE_PASSWORD
 make up
-make logs                     # follow startup
+make bootstrap                # create the organization and admin account
 make smoke                    # send telemetry and confirm it is queryable
 ```
+
+**`make bootstrap` is a required step.** Until SigNoz has an organization it
+will not register the collector over OpAMP, and a collector started with
+`--manager-config` stays in **no-op mode** until it gets a config — every
+receiver replaced by a `nop` receiver. Nothing is ingested and port 4318
+refuses connections, all while the container reports healthy. Creating the
+account in the UI on first visit does the same thing.
 
 Ports bind to `127.0.0.1` by default. Nothing is reachable from another machine
 until you change `BIND_ADDRESS` — and you should not, until you have read

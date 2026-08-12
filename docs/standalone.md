@@ -55,14 +55,22 @@ signoz-schema-migrator     Exited (0)
 
 The two `Exited (0)` containers are correct — they are one-shot jobs.
 
-UI: <http://localhost:8080>. Create the admin account on first visit.
+UI: <http://localhost:8080>.
 
-Until you do, the logs carry a repeating pair of errors — `cannot create agent
-without orgId` from the backend and `Server returned an error response` from the
-collector. That is expected: OpAMP agents register against an organization and
-there is not one yet. Ingestion works throughout, and the messages stop once the
-account exists. See
-[operations.md](operations.md#cannot-create-agent-without-orgid-on-a-fresh-install).
+**Create the admin account before sending any telemetry** — in the UI on first
+visit, or headlessly:
+
+```bash
+scripts/bootstrap.sh standalone
+```
+
+This is a required step, not a nicety. Until an organization exists the backend
+will not register the collector over OpAMP, so it never receives a config — and
+a collector started with `--manager-config` sits in **no-op mode** until it
+does, with every receiver replaced by a `nop` receiver. Nothing is ingested and
+port 4318 refuses connections, while the container still reports healthy. The
+collector picks up its config within ~30s of the organization existing. Details:
+[operations.md](operations.md#nothing-is-ingested-on-a-fresh-install-and-otlp-refuses-connections).
 
 ---
 

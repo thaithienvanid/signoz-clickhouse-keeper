@@ -96,6 +96,23 @@ if [ "$code" = "200" ]; then pass "GET /api/v1/health -> 200"; else fail "GET /a
 # ── Ingest ───────────────────────────────────────────────────────────────────
 head_ "ingestion"
 
+# A collector started with --manager-config begins in no-op mode: every
+# receiver is swapped for a nop receiver until the OpAMP server pushes it a
+# config. The container reports healthy the whole time. So a refused OTLP
+# connection almost always means SigNoz has no organization yet, not that the
+# stack is broken — say so rather than letting three POSTs fail with 000.
+otlp_host="$(printf '%s' "$OTLP_ENDPOINT" | sed -E 's#^[a-z]+://##; s#/.*$##; s#:.*$##')"
+otlp_port="$(printf '%s' "$OTLP_ENDPOINT" | sed -E 's#^[a-z]+://##; s#/.*$##' | awk -F: 'NF>1{print $2; exit} {print "4318"}')"
+if ! (exec 3<>"/dev/tcp/${otlp_host}/${otlp_port}") 2>/dev/null; then
+    fail "OTLP endpoint ${otlp_host}:${otlp_port} is not accepting connections"
+    echo "        The collector is probably still in no-op mode, which it stays in"
+    echo "        until SigNoz has an organization. Create one, then re-run:"
+    echo "            scripts/bootstrap.sh ${STACK}"
+    echo
+    printf '\033[31m%d check(s) failed\033[0m\n' "$FAILURES"
+    exit 1
+fi
+
 trace_body=$(cat <<JSON
 {"resourceSpans":[{"resource":{"attributes":[
   {"key":"service.name","value":{"stringValue":"${RUN_ID}"}}]},

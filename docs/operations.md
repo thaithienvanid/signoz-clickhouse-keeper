@@ -315,25 +315,44 @@ make logs SERVICE=signoz
 credentials and the ClickHouse logs. Both flat means nothing is arriving; check
 the client's endpoint and any auth you enabled.
 
-### `cannot create agent without orgId` on a fresh install
+### Nothing is ingested on a fresh install, and OTLP refuses connections
 
 ```
-signoz  | ERROR failed to find or create agent ... "cannot create agent without orgId"
+signoz    | ERROR failed to find or create agent ... "cannot create agent without orgId"
 collector | ERROR Server returned an error response
+$ curl -X POST http://localhost:4318/v1/traces ...
+curl: (7) Failed to connect to localhost port 4318: Connection refused
 ```
 
-Expected, and self-resolving. OpAMP agents are registered against an
-organization, and a brand-new deployment has none until you complete first-run
-setup in the UI (create the admin account). Until then the collector retries
-every 30s and logs this each time.
+**Create the organization first.** A fresh deployment ingests nothing until it
+has one:
 
-Ingestion is unaffected — the collector runs its own config and writes to
-ClickHouse throughout. Create the account at `http://localhost:8080` and the
-messages stop. SigNoz's own code comments this path as intentional
-(`pkg/query-service/app/opamp/opamp_server.go`).
+```bash
+scripts/bootstrap.sh standalone      # or create the account in the UI
+```
 
-If it persists *after* you have created an account, that is a real problem —
-check that the collector is reaching the backend it thinks it is.
+This is not a warning you can defer. The chain is:
+
+1. A new deployment has no organization.
+2. The collector connects over OpAMP; the backend refuses to register the agent
+   without one.
+3. So the backend never pushes the collector a config.
+4. A collector started with `--manager-config` **begins in no-op mode**: it
+   replaces every receiver in every pipeline with a `nop` receiver and drops the
+   processors. It leaves that mode only when the server pushes a config.
+5. So no OTLP listener is bound, and nothing is ingested.
+
+The container reports **healthy** throughout — no-op mode exists precisely so
+health checks pass while an agent waits for its first server config
+(`opamp/server_client.go`, `initialNopConfig`). `docker compose ps` will show
+the ports published and the collector `Up (healthy)` while port 4318 refuses
+connections, because nothing is listening inside the container.
+
+Once the organization exists, the collector picks up its config on the next
+OpAMP poll (within ~30s) and the OTLP ports open.
+
+If the `orgId` errors persist *after* bootstrapping, that is a real problem —
+check the collector is reaching the backend it thinks it is.
 
 ### Log pipelines configured in the UI do nothing
 

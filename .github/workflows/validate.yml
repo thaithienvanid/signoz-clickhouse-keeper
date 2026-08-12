@@ -61,6 +61,13 @@ jobs:
         working-directory: deploy/standalone
         run: docker compose up -d --wait --wait-timeout 900
 
+      # Not optional. Without an organization the collector never leaves
+      # no-op mode, so nothing is ingested and the smoke test cannot pass.
+      - name: Bootstrap organization and admin
+        env:
+          SIGNOZ_ADMIN_PASSWORD: Ci-Bootstrap-1!
+        run: ./scripts/bootstrap.sh standalone
+
       - name: Smoke test
         run: ./scripts/smoke-test.sh standalone
 

@@ -22,7 +22,7 @@ else
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help init up down restart ps logs pull validate smoke backup restore \
+.PHONY: help init up down restart ps logs pull bootstrap validate smoke backup restore \
         config clean nuke keeper-status cluster-status replication-status
 
 help: ## Show this help
@@ -60,6 +60,9 @@ pull: init ## Pull the pinned images
 
 config: init ## Print the fully resolved compose configuration
 	$(DC) config
+
+bootstrap: ## Create the organization and admin account (REQUIRED before ingestion)
+	@./scripts/bootstrap.sh $(STACK)
 
 validate: ## Run all static checks (no daemon needed)
 	@./scripts/validate.sh

@@ -30,12 +30,32 @@ container it runs in.
   security overlays now run an `init-collector-queue` service that chowns it
   first.
 
-Also documented, after seeing it in the CI logs: a fresh install logs
-`cannot create agent without orgId` from the backend and a matching error from
-the collector, every 30s, until you create the admin account in the UI. OpAMP
-agents register against an organization and there is not one yet. Ingestion is
-unaffected and the messages stop on their own — SigNoz's code comments this
-path as intentional.
+**Creating the organization is a required deployment step, not cosmetic.** An
+earlier revision of this changelog claimed the `cannot create agent without
+orgId` errors on a fresh install were harmless and that "ingestion is
+unaffected". That was wrong, and the end-to-end job proved it: every OTLP POST
+returned `000` and `distributed_signoz_index_v3` stayed empty.
+
+What actually happens is a chain:
+
+1. A new deployment has no organization.
+2. The collector connects over OpAMP; the backend refuses to register an agent
+   without one.
+3. The backend therefore never pushes the collector a config.
+4. A collector started with `--manager-config` **begins in no-op mode** — it
+   replaces every receiver in every pipeline with a `nop` receiver and drops
+   the processors (`opamp/server_client.go`, `initialNopConfig`) — and leaves
+   that mode only when a server config arrives.
+5. So no OTLP listener binds and nothing is ingested.
+
+The container reports healthy the entire time; no-op mode exists precisely so
+health checks pass while an agent waits for its first config. `docker compose
+ps` shows the ports published and the collector `Up (healthy)` while port 4318
+refuses connections.
+
+Added `scripts/bootstrap.sh` (and `make bootstrap`) to create the organization
+and admin user headlessly, wired it into CI between startup and the smoke test,
+and corrected the README, `docs/standalone.md` and `docs/operations.md`.
 
 **Known coverage gap:** CI runs the standalone stack end to end. The HA stack is
 statically validated (compose resolution, `nginx -t`, replica-identity and
