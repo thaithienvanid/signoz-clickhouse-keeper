@@ -12,14 +12,29 @@
 # bind mount would create a directory and the collector would fail to start.
 
 services:
+  # A fresh named volume is created root-owned, but the collector image runs as
+  # uid 10001, so file_storage cannot write its queue into it. Fix ownership
+  # once, as root, before the collector starts. Harmless when the
+  # persistent-queue fragment is not in use — it just chowns an empty directory.
+  init-collector-queue:
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTEL_COLLECTOR_VERSION}
+    container_name: signoz-init-collector-queue
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /var/lib/otelcol/queue && chown -R 10001:10001 /var/lib/otelcol/queue"]
+    volumes:
+      - collector-queue:/var/lib/otelcol/queue
+    restart: on-failure
+    networks: [signoz-net]
+
   otel-collector:
+    depends_on:
+      init-collector-queue: {condition: service_completed_successfully}
     volumes:
       - ./collector/config.generated.yaml:/etc/otel-collector-config.yaml:ro
       - ./collector/opamp.yaml:/etc/opamp-config.yaml:ro
       - ./certs:/etc/otel/certs:ro
       - ./secrets:/etc/otel/secrets:ro
-      # Only used by the persistent-queue fragment; an unused volume costs
-      # nothing but an empty directory.
       - collector-queue:/var/lib/otelcol/queue
 
 volumes:

@@ -105,12 +105,43 @@ if [ -n "$CLIENT_CN" ]; then
     rm -f "client-${CLIENT_CN}.csr"
 fi
 
-chmod 600 ./*.key
+# ── Permissions ──────────────────────────────────────────────────────────────
+# The collector image declares `USER 10001`, so a mode-0600 key owned by the
+# host user is unreadable inside the container and TLS fails to start. Only
+# server.key needs to cross that boundary: the CA key signs certificates and
+# must never leave the operator, and client keys belong to clients.
+COLLECTOR_UID=10001
+
 chmod 644 ./*.crt
+chmod 600 ./*.key
+
+if chown "$COLLECTOR_UID" server.key 2>/dev/null; then
+    server_key_note="mode 600, owned by uid ${COLLECTOR_UID} (the collector)"
+else
+    chmod 644 server.key
+    server_key_note="mode 644 — see warning below"
+fi
 
 echo
 echo "wrote to deploy/${STACK}/certs/:"
 ls -1 .
+echo
+echo "  ca.key        mode 600, $(stat -c '%U' ca.key 2>/dev/null || echo 'host user') — signing key, never mount this anywhere"
+echo "  server.key    ${server_key_note}"
+echo "  *.crt         mode 644 — public"
+
+if [ "$server_key_note" = "mode 644 — see warning below" ]; then
+    cat <<WARN
+
+WARNING: could not chown server.key to uid ${COLLECTOR_UID} (not running as root).
+It has been left world-readable so the collector container can read it, which
+means any local user can read your TLS private key too. To tighten it:
+
+    sudo chown ${COLLECTOR_UID} deploy/${STACK}/certs/server.key
+    sudo chmod 600 deploy/${STACK}/certs/server.key
+WARN
+fi
+
 echo
 echo "verify:  openssl verify -CAfile ca.crt server.crt"
 echo "inspect: openssl x509 -in server.crt -noout -text | grep -A1 'Subject Alternative Name'"

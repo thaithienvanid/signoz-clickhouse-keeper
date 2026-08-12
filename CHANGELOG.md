@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-08-12 — Fixes from the first real CI run
+
+The end-to-end job in `.github/workflows/validate.yml` stood the standalone
+stack up for real and found things static validation could not. All four are
+the same shape: a command or file that is fine on the host but wrong inside the
+container it runs in.
+
+- **The collector health check called `wget`, which its image does not have.**
+  `signoz/signoz-otel-collector` is built on `debian:bookworm-slim` — no `wget`,
+  no `curl`. The check failed with "executable not found", Docker marked the
+  container unhealthy, and `docker compose up --wait` aborted the whole deploy
+  even though the collector was running correctly and its health extension was
+  serving on 13133. Replaced with an HTTP request built from bash builtins
+  (`/dev/tcp`, `printf`, `read`), which needs nothing but `bash`.
+- **`nginx -t` in CI could not resolve its own upstreams.** nginx resolves
+  `upstream` hostnames at config-parse time, so testing the config in a bare
+  container failed with "host not found in upstream" regardless of syntax. The
+  config was correct; the test was wrong. Now stubs the service names via
+  `--add-host`.
+- **Secrets were unreadable by the collector.** It runs as `USER 10001`, so the
+  mode-0600 certificates and `.htpasswd` written by `gen-certs.sh` and
+  `gen-htpasswd.sh` — owned by the host user — were invisible inside the
+  container. Both scripts now `chown` the files the collector needs to that uid
+  and keep them at 0600, falling back to 0644 with an explicit warning when not
+  running as root. `ca.key` and client keys deliberately stay host-owned.
+- **The persistent-queue volume was unwritable.** A fresh named volume is
+  created root-owned, so `file_storage` could not write to it as uid 10001. The
+  security overlays now run an `init-collector-queue` service that chowns it
+  first.
+
+Also documented, after seeing it in the CI logs: a fresh install logs
+`cannot create agent without orgId` from the backend and a matching error from
+the collector, every 30s, until you create the admin account in the UI. OpAMP
+agents register against an organization and there is not one yet. Ingestion is
+unaffected and the messages stop on their own — SigNoz's code comments this
+path as intentional.
+
+**Known coverage gap:** CI runs the standalone stack end to end. The HA stack is
+statically validated (compose resolution, `nginx -t`, replica-identity and
+cluster-name assertions) but is not stood up, so its runtime path has not been
+exercised the way standalone's now has.
+
 ## 2026-08-12 — Deployable stacks, corrected configuration, supported versions
 
 This revision replaces a single 2,670-line guide whose embedded configuration

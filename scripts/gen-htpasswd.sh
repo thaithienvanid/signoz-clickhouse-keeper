@@ -55,6 +55,22 @@ if grep -q "^${USERNAME}:" "$HTPASSWD" 2>/dev/null; then
 fi
 printf '%s\n' "$HASH" >> "$HTPASSWD"
 
+# The collector image declares `USER 10001`; a mode-0600 file owned by the host
+# user is unreadable inside the container, and basicauth fails to start.
+COLLECTOR_UID=10001
+if ! chown "$COLLECTOR_UID" "$HTPASSWD" 2>/dev/null; then
+    chmod 644 "$HTPASSWD"
+    cat <<WARN
+
+WARNING: could not chown .htpasswd to uid ${COLLECTOR_UID} (not running as root).
+It has been left world-readable so the collector can read it. The passwords are
+bcrypt-hashed, but the hashes are now offline-crackable by any local user. To
+tighten it:
+
+    sudo chown ${COLLECTOR_UID} ${HTPASSWD} && sudo chmod 600 ${HTPASSWD}
+WARN
+fi
+
 echo "updated deploy/${STACK}/secrets/.htpasswd"
 if [ "$GENERATED" = true ]; then
     echo

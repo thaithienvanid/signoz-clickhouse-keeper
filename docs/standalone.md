@@ -55,7 +55,14 @@ signoz-schema-migrator     Exited (0)
 
 The two `Exited (0)` containers are correct — they are one-shot jobs.
 
-UI: <http://localhost:8080>.
+UI: <http://localhost:8080>. Create the admin account on first visit.
+
+Until you do, the logs carry a repeating pair of errors — `cannot create agent
+without orgId` from the backend and `Server returned an error response` from the
+collector. That is expected: OpAMP agents register against an organization and
+there is not one yet. Ingestion works throughout, and the messages stop once the
+account exists. See
+[operations.md](operations.md#cannot-create-agent-without-orgid-on-a-fresh-install).
 
 ---
 

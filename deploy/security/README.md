@@ -61,7 +61,8 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf 'ingest:%s' "$PA
 ```bash
 mkdir -p deploy/standalone/secrets
 openssl rand -hex 32 >> deploy/standalone/secrets/tokens.txt
-chmod 600 deploy/standalone/secrets/tokens.txt
+sudo chown 10001 deploy/standalone/secrets/tokens.txt   # see "File ownership" below
+sudo chmod 600 deploy/standalone/secrets/tokens.txt
 scripts/apply-security.sh standalone bearer-auth
 ```
 
@@ -129,6 +130,36 @@ batch and retry in-process, and in-flight data is lost if the collector restarts
 or ClickHouse stays down past the retry budget. This fragment backs the queue
 with `file_storage` on a named volume, so batches survive a restart and drain
 when ClickHouse returns. It costs disk I/O on the ingest path.
+
+## File ownership
+
+The collector image declares `USER 10001`, so anything it must read has to be
+readable by that uid — not just by you. A secret left at mode `0600` owned by
+your host user is invisible inside the container, and the extension that needs
+it fails at startup.
+
+`gen-certs.sh` and `gen-htpasswd.sh` handle this: they `chown` the files the
+collector needs to uid 10001 and keep them at mode `0600`. Run them with `sudo`
+(or as root) and that just works. Without root they fall back to mode `0644`
+and print a warning — readable by the container, and by every other local user,
+which is the trade-off you are accepting.
+
+Two files deliberately stay yours and never get chowned:
+
+| File | Why |
+|---|---|
+| `certs/ca.key` | The signing key. It is never mounted into any container. |
+| `certs/client-*.key` | Belongs to the client, not the collector. |
+
+Verify the uid against the image rather than trusting this number:
+
+```bash
+docker inspect signoz/signoz-otel-collector:v0.144.8 --format '{{.Config.User}}'
+```
+
+The same applies to the `persistent-queue` fragment, but the compose overlay
+takes care of it: a fresh named volume is created root-owned, so an
+`init-collector-queue` service chowns it to 10001 before the collector starts.
 
 ## Where TLS belongs in HA
 

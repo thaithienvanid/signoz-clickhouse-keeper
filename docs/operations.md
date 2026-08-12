@@ -302,6 +302,26 @@ make logs SERVICE=signoz
 credentials and the ClickHouse logs. Both flat means nothing is arriving; check
 the client's endpoint and any auth you enabled.
 
+### `cannot create agent without orgId` on a fresh install
+
+```
+signoz  | ERROR failed to find or create agent ... "cannot create agent without orgId"
+collector | ERROR Server returned an error response
+```
+
+Expected, and self-resolving. OpAMP agents are registered against an
+organization, and a brand-new deployment has none until you complete first-run
+setup in the UI (create the admin account). Until then the collector retries
+every 30s and logs this each time.
+
+Ingestion is unaffected — the collector runs its own config and writes to
+ClickHouse throughout. Create the account at `http://localhost:8080` and the
+messages stop. SigNoz's own code comments this path as intentional
+(`pkg/query-service/app/opamp/opamp_server.go`).
+
+If it persists *after* you have created an account, that is a real problem —
+check that the collector is reaching the backend it thinks it is.
+
 ### Log pipelines configured in the UI do nothing
 
 The collector has no OpAMP session. Confirm `--manager-config` is on its command

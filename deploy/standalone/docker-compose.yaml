@@ -206,8 +206,20 @@ services:
       LOW_CARDINAL_EXCEPTION_GROUPING: ${LOW_CARDINAL_EXCEPTION_GROUPING:-false}
       MEMORY_LIMITER_MIB: ${MEMORY_LIMITER_MIB:-1600}
       MEMORY_LIMITER_SPIKE_MIB: ${MEMORY_LIMITER_SPIKE_MIB:-320}
+    # The collector image is debian:bookworm-slim, which ships neither wget nor
+    # curl — the usual `wget --spider` health check fails with "executable not
+    # found" and the container is marked unhealthy while it is actually fine.
+    # This talks HTTP to the health extension using bash builtins only.
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/13133 || exit 1;
+          printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3;
+          read -r line <&3;
+          [[ $$line == *"200 OK"* ]]
       interval: 30s
       timeout: 10s
       retries: 3

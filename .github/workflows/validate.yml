@@ -30,7 +30,16 @@ jobs:
 
       - name: Check nginx config
         run: |
-          docker run --rm -v "$PWD/deploy/ha/loadbalancer/nginx.conf:/etc/nginx/nginx.conf:ro" \
+          # nginx resolves every `upstream` hostname at config-parse time, so
+          # `nginx -t` in a bare container fails with "host not found in
+          # upstream" even when the syntax is perfect. Stub the compose service
+          # names in /etc/hosts so the parse gets as far as the actual syntax.
+          docker run --rm \
+            --add-host otel-collector-1:127.0.0.1 \
+            --add-host otel-collector-2:127.0.0.1 \
+            --add-host signoz-1:127.0.0.1 \
+            --add-host signoz-2:127.0.0.1 \
+            -v "$PWD/deploy/ha/loadbalancer/nginx.conf:/etc/nginx/nginx.conf:ro" \
             nginx:1.29-alpine nginx -t
 
   # Actually stands the standalone stack up and pushes telemetry through it.

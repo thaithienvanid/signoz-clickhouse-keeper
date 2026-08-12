@@ -17,7 +17,26 @@
 # mount would create a directory and the collectors would fail to start.
 
 services:
+  # Fresh named volumes are root-owned; the collector runs as uid 10001 and
+  # file_storage could not write its queue. Fix ownership once, as root.
+  init-collector-queue:
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTEL_COLLECTOR_VERSION}
+    container_name: signoz-ha-init-collector-queue
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /queue-1 /queue-2 &&
+        chown -R 10001:10001 /queue-1 /queue-2
+    volumes:
+      - collector-queue-1:/queue-1
+      - collector-queue-2:/queue-2
+    restart: on-failure
+    networks: [signoz-ha-net]
+
   otel-collector-1:
+    depends_on:
+      init-collector-queue: {condition: service_completed_successfully}
     volumes:
       - ./collector/config.generated.yaml:/etc/otel-collector-config.yaml:ro
       - ./collector/opamp-1.yaml:/etc/opamp-config.yaml:ro
@@ -26,6 +45,8 @@ services:
       - collector-queue-1:/var/lib/otelcol/queue
 
   otel-collector-2:
+    depends_on:
+      init-collector-queue: {condition: service_completed_successfully}
     volumes:
       - ./collector/config.generated.yaml:/etc/otel-collector-config.yaml:ro
       - ./collector/opamp-2.yaml:/etc/opamp-config.yaml:ro
