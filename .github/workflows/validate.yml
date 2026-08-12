@@ -16,6 +16,10 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # Every step here is seconds of work. Without a bound, a hung image pull
+    # holds a runner for the default six hours — which is exactly what happened
+    # once to the nginx step below.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +33,7 @@ jobs:
         run: ./scripts/validate.sh
 
       - name: Check nginx config
+        timeout-minutes: 5
         run: |
           # nginx resolves every `upstream` hostname at config-parse time, so
           # `nginx -t` in a bare container fails with "host not found in
