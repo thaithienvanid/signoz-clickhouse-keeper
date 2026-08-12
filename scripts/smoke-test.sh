@@ -59,11 +59,23 @@ post_otlp() {
     curl "${args[@]}"
 }
 
+# Runs a query and leaves the server's error message in CH_ERR rather than
+# discarding it. Swallowing stderr here turns "column does not exist" into an
+# empty result, which is indistinguishable from "no rows yet" — a poll loop
+# then spins to its timeout and reports the wrong cause.
+CH_ERR=""
 ch_query() {
-    docker exec "$CH_CONTAINER" clickhouse-client \
+    local out rc err_file
+    err_file="$(mktemp)"
+    out="$(docker exec "$CH_CONTAINER" clickhouse-client \
         --user "${CLICKHOUSE_USER:-signoz}" \
         --password "${CLICKHOUSE_PASSWORD:-}" \
-        --query "$1" 2>/dev/null
+        "${@:2}" --query "$1" 2>"$err_file")"
+    rc=$?
+    CH_ERR="$(tr '\n' ' ' < "$err_file" | cut -c1-400)"
+    rm -f "$err_file"
+    printf '%s' "$out"
+    return $rc
 }
 
 # ── Containers ───────────────────────────────────────────────────────────────
@@ -123,18 +135,35 @@ if [ "$code" = "200" ]; then pass "POST /v1/metrics -> 200"; else fail "POST /v1
 # Exporters batch on a timer, so give them a moment before looking.
 head_ "storage"
 echo "  waiting up to 60s for the batch to flush..."
+
+# Match on the resource map rather than on the materialized
+# resource_string_service$$name column or its serviceName alias: the map is
+# unambiguously present on the distributed table, and it keeps '$$' — which
+# bash would expand to the PID — out of the query entirely. The service name
+# is bound as a query parameter, not interpolated.
+TRACE_QUERY="SELECT count() FROM signoz_traces.distributed_signoz_index_v3
+             WHERE resources_string['service.name'] = {svc:String}"
+
 found_traces=false
 for _ in $(seq 1 12); do
     sleep 5
-    # serviceName is the schema's alias for the resource_string_service$$name
-    # column; using the alias avoids escaping '$$' through bash and docker exec.
-    n=$(ch_query "SELECT count() FROM signoz_traces.distributed_signoz_index_v3 WHERE serviceName = '${RUN_ID}'")
-    if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then found_traces=true; break; fi
+    if n=$(ch_query "$TRACE_QUERY" --param_svc="$RUN_ID"); then
+        if [ -n "${n:-}" ] && [ "$n" -gt 0 ] 2>/dev/null; then found_traces=true; break; fi
+    fi
 done
+
 if [ "$found_traces" = true ]; then
     pass "trace for service '${RUN_ID}' is queryable in ClickHouse"
 else
-    fail "no trace for service '${RUN_ID}' after 60s — check 'docker compose -f ${COMPOSE} logs otel-collector'"
+    fail "no trace for service '${RUN_ID}' after 60s"
+    # Say why. A query error and an empty table look identical otherwise.
+    if [ -n "$CH_ERR" ]; then
+        echo "        clickhouse error: ${CH_ERR}"
+    fi
+    total=$(ch_query "SELECT count() FROM signoz_traces.distributed_signoz_index_v3") || true
+    echo "        rows in distributed_signoz_index_v3: ${total:-<query failed>}"
+    [ -n "$CH_ERR" ] && echo "        (${CH_ERR})"
+    echo "        collector logs: docker compose -f ${COMPOSE} logs otel-collector"
 fi
 
 # ── Replication (HA only) ────────────────────────────────────────────────────
