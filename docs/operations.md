@@ -124,6 +124,19 @@ The config archive holds `.env`. Encrypt it before it leaves the host:
 gpg --symmetric --cipher-algo AES256 backups/standalone-*/config.tar.gz
 ```
 
+### The metastore snapshot is not fully online
+
+ClickHouse is backed up live, but the **SQLite metastore is not**. SQLite in WAL
+mode splits committed state between `signoz.db` and its `-wal` sidecar, so
+copying the file from under a running writer produces a torn snapshot that may
+not even open. `backup.sh` therefore stops SigNoz for the few seconds it takes
+to copy, then starts it again.
+
+Ingestion is unaffected — collectors write to ClickHouse and never touch the
+metastore — so the cost is a brief gap in the UI, not lost telemetry. The HA
+stack has no such pause: `pg_dump` gives a consistent snapshot of a running
+Postgres.
+
 ### ClickHouse backups are online
 
 `BACKUP ... TO Disk()` runs against a live server; no downtime. The script adds

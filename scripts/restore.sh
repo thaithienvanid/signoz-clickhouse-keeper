@@ -36,8 +36,14 @@ case "$STACK" in
     *) echo "error: unknown stack '${STACK}'" >&2; exit 1 ;;
 esac
 
-# shellcheck disable=SC1090
-set -a; . "${STACK_DIR}/.env"; set +a
+if [ ! -f "${STACK_DIR}/.env" ]; then
+    echo "error: ${STACK_DIR}/.env not found — bring the stack up before restoring into it" >&2
+    exit 1
+fi
+set -a
+# shellcheck source=/dev/null
+. "${STACK_DIR}/.env"
+set +a
 
 echo "restoring '${STACK}' from ${BACKUP_DIR}"
 [ -f "${BACKUP_DIR}/MANIFEST.txt" ] && sed 's/^/  /' "${BACKUP_DIR}/MANIFEST.txt"

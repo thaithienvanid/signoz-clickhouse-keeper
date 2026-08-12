@@ -44,8 +44,14 @@ case "$STACK" in
     ha)         CH_CONTAINERS=(signoz-clickhouse-1); SIGNOZ_CONTAINER=signoz-1 ;;
 esac
 
-# shellcheck disable=SC1090
-set -a; . "${STACK_DIR}/.env"; set +a
+if [ ! -f "${STACK_DIR}/.env" ]; then
+    echo "error: ${STACK_DIR}/.env not found — nothing is deployed from this stack yet" >&2
+    exit 1
+fi
+set -a
+# shellcheck source=/dev/null
+. "${STACK_DIR}/.env"
+set +a
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="${OUTPUT_ROOT}/${STACK}-${STAMP}"
@@ -63,8 +69,16 @@ echo "    config.tar.gz ($(du -h "${DEST}/config.tar.gz" | cut -f1)) — contain
 # A ClickHouse-only backup silently loses all of it.
 echo "==> metastore"
 if [ "$STACK" = "standalone" ]; then
-    docker exec "$SIGNOZ_CONTAINER" \
-        sh -c 'cat /var/lib/signoz/signoz.db' > "${DEST}/metastore-signoz.db"
+    # SQLite cannot be copied safely from under a running writer: in WAL mode
+    # the committed state is split between signoz.db and its -wal sidecar, so
+    # copying the .db alone yields a torn snapshot that may not even open.
+    # Stopping SigNoz checkpoints and closes the database first. Ingestion is
+    # unaffected — the collector writes to ClickHouse, not here — so the only
+    # cost is a few seconds without the UI.
+    echo "    stopping SigNoz briefly for a consistent SQLite snapshot"
+    docker compose -f "${STACK_DIR}/docker-compose.yaml" stop "$SIGNOZ_CONTAINER" >/dev/null
+    docker cp "${SIGNOZ_CONTAINER}:/var/lib/signoz/signoz.db" "${DEST}/metastore-signoz.db"
+    docker compose -f "${STACK_DIR}/docker-compose.yaml" start "$SIGNOZ_CONTAINER" >/dev/null
     echo "    metastore-signoz.db ($(du -h "${DEST}/metastore-signoz.db" | cut -f1))"
 else
     docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" signoz-postgres \
