@@ -1,0 +1,34 @@
+# Mutual TLS on the OTLP receivers: the collector also verifies the client.
+#
+#   scripts/gen-certs.sh standalone
+#   scripts/apply-security.sh standalone mtls
+#
+# This fragment is self-contained — it includes everything in tls.yaml plus
+# client verification, so do NOT apply both.
+#
+# Possession of a certificate signed by the CA is the credential, so no
+# separate auth extension is needed. Every client needs its own key pair:
+#   scripts/gen-certs.sh standalone --client payments-api
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        tls:
+          cert_file: /etc/otel/certs/server.crt
+          key_file: /etc/otel/certs/server.key
+          # Presence of client_ca_file is what turns TLS into mTLS: clients
+          # without a certificate signed by this CA are rejected at handshake.
+          client_ca_file: /etc/otel/certs/ca.crt
+          # Re-read the CA so revoking a client is a file change, not a restart.
+          client_ca_file_reload: true
+          min_version: "1.2"
+          reload_interval: 24h
+      http:
+        tls:
+          cert_file: /etc/otel/certs/server.crt
+          key_file: /etc/otel/certs/server.key
+          client_ca_file: /etc/otel/certs/ca.crt
+          client_ca_file_reload: true
+          min_version: "1.2"
+          reload_interval: 24h

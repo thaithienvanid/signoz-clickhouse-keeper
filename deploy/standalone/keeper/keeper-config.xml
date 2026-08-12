@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse Keeper — single node.
+
+  A one-node Keeper has no fault tolerance: lose it and ClickHouse goes
+  read-only for anything touching replicated tables. That is an acceptable
+  trade for a single-server install; for production use the 3-node quorum in
+  ../../ha instead.
+-->
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>true</console>
+    </logger>
+
+    <listen_host>0.0.0.0</listen_host>
+
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+
+        <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <!--
+          Four-letter monitoring commands. The default allow-list includes
+          mutating commands (crst, srst, rcvr, rqld, ydld, clrs); this is the
+          read-only subset, which still covers `ruok` for the container health
+          check and `mntr` for scraping.
+          `four_letter_word_allow_list` is the current spelling;
+          `four_letter_word_white_list` is the deprecated alias.
+        -->
+        <four_letter_word_allow_list>conf,cons,envi,ruok,srvr,stat,wchs,dirs,mntr,isro,apiv,lgif</four_letter_word_allow_list>
+
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <raft_logs_level>warning</raft_logs_level>
+
+            <!-- Snapshot / log retention -->
+            <snapshot_distance>100000</snapshot_distance>
+            <reserved_log_items>100000</reserved_log_items>
+            <snapshots_to_keep>3</snapshots_to_keep>
+
+            <!--
+              Compression. These are coordination_settings, not keeper_server
+              children — placed a level up they are silently ignored.
+              compress_logs defaults to false, so it is worth setting.
+            -->
+            <compress_logs>true</compress_logs>
+            <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
+
+            <!-- Election tuning (defaults, stated explicitly) -->
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
+
+            <!--
+              fsync every Raft write. With a single node there is no replica to
+              recover from, so durability rests entirely on this. Set false only
+              if you can afford to lose the last few writes on an unclean stop.
+            -->
+            <force_sync>true</force_sync>
+        </coordination_settings>
+
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>clickhouse-keeper</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+</clickhouse>

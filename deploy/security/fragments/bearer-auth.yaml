@@ -1,0 +1,30 @@
+# Bearer-token (API key) authentication on the OTLP receivers.
+#
+#   scripts/apply-security.sh standalone bearer-auth
+#
+# Tokens are read from a file so they never land in the config or in `docker
+# inspect`. One token per line; rotate by adding the new token, moving clients
+# over, then removing the old one.
+#
+#   mkdir -p deploy/standalone/secrets
+#   openssl rand -hex 32 >> deploy/standalone/secrets/tokens.txt
+#   chmod 600 deploy/standalone/secrets/tokens.txt
+#
+# Clients send:  Authorization: Bearer <token>
+
+extensions:
+  bearertokenauth/server:
+    filename: /etc/otel/secrets/tokens.txt
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        auth:
+          authenticator: bearertokenauth/server
+      http:
+        auth:
+          authenticator: bearertokenauth/server
+
+service:
+  extensions: [bearertokenauth/server]

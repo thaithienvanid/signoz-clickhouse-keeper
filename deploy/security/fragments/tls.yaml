@@ -1,0 +1,30 @@
+# TLS on the OTLP receivers (server authentication only).
+#
+#   scripts/gen-certs.sh standalone
+#   scripts/apply-security.sh standalone tls
+#
+# Combine with an auth fragment — TLS proves who the *server* is, it does not
+# say who the client is:
+#   scripts/apply-security.sh standalone tls bearer-auth
+#
+# Clients must then use https:// / grpcs:// endpoints and trust the CA:
+#   export OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example.com:4318
+#   export OTEL_EXPORTER_OTLP_CERTIFICATE=/path/to/ca.crt
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        tls:
+          cert_file: /etc/otel/certs/server.crt
+          key_file: /etc/otel/certs/server.key
+          # TLS 1.2 floor. Raise to "1.3" once every client SDK supports it.
+          min_version: "1.2"
+          # Pick the new cert up on renewal without restarting the collector.
+          reload_interval: 24h
+      http:
+        tls:
+          cert_file: /etc/otel/certs/server.crt
+          key_file: /etc/otel/certs/server.key
+          min_version: "1.2"
+          reload_interval: 24h

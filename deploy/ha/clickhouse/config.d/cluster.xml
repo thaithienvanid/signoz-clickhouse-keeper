@@ -1,0 +1,108 @@
+<?xml version="1.0"?>
+<!--
+  Shared ClickHouse overlay for every node in the HA cluster.
+
+  Identical on all three nodes. Everything node-specific lives in
+  macros-N.xml, which is mounted alongside this file.
+-->
+<clickhouse>
+    <!-- All three Keeper nodes. ClickHouse fails over between them on its own;
+         it does not need to be pointed at the current leader. -->
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper-1</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-2</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-3</host>
+            <port>9181</port>
+        </node>
+        <session_timeout_ms>30000</session_timeout_ms>
+        <operation_timeout_ms>10000</operation_timeout_ms>
+    </zookeeper>
+
+    <!--
+      One shard, three replicas: every node holds a full copy of the data.
+
+      This is the right default for SigNoz HA. Sharding splits the data instead
+      of copying it, so a 3-shard cluster survives no node failures at all
+      unless each shard also has replicas. Start replicated; add shards only
+      when one node can no longer hold the working set.
+
+      The cluster name MUST be `cluster` - the schema migrator and the SigNoz
+      backend both default to that exact name.
+    -->
+    <remote_servers>
+        <cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse-1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>clickhouse-2</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>clickhouse-3</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </cluster>
+    </remote_servers>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+        <cleanup_delay_period>604800</cleanup_delay_period>
+        <task_max_lifetime>604800</task_max_lifetime>
+    </distributed_ddl>
+
+    <!-- Bound ClickHouse's own system logs; on a busy cluster they otherwise
+         compete for disk with the telemetry you are actually storing. -->
+    <query_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+    </query_log>
+    <trace_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+    </trace_log>
+    <query_thread_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </query_thread_log>
+    <query_views_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </query_views_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </part_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <session_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </session_log>
+    <text_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+    </text_log>
+    <zookeeper_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </zookeeper_log>
+    <processors_profile_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </processors_profile_log>
+    <error_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </error_log>
+</clickhouse>

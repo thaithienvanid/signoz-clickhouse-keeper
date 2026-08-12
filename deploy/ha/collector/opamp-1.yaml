@@ -1,0 +1,7 @@
+# OpAMP control channel for otel-collector-1.
+#
+# Collector replicas are deliberately split across backends so a single SigNoz
+# restart does not drop every collector's control session at once. Agent
+# configuration is persisted in the shared Postgres metastore, so a pipeline
+# edited on either backend reaches both collectors.
+server_endpoint: ws://signoz-1:4320/v1/opamp

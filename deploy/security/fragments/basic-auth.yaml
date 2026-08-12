@@ -1,0 +1,33 @@
+# Basic authentication on the OTLP receivers.
+#
+# Deep-merged into a stack's collector/config.yaml by:
+#   scripts/apply-security.sh standalone basic-auth
+#
+# Requires an htpasswd file at <stack>/secrets/.htpasswd:
+#   scripts/gen-htpasswd.sh standalone ingest
+#
+# The password is bcrypt-hashed in the file, but Basic auth still sends the
+# cleartext password on every request. Pair this with TLS unless the collector
+# is only reachable over a trusted network.
+
+extensions:
+  basicauth/server:
+    htpasswd:
+      # File only — do not also set `inline`, which silently wins over `file`.
+      file: /etc/otel/secrets/.htpasswd
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        auth:
+          authenticator: basicauth/server
+      http:
+        auth:
+          authenticator: basicauth/server
+
+service:
+  # apply-security.sh unions this with the extensions already in the base
+  # config, so signoz_health_check and pprof survive. Hand-editing this list
+  # in the base file is the usual way people break their own health checks.
+  extensions: [basicauth/server]

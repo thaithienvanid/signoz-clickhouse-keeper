@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!--
+  User-defined executable function backing SigNoz's percentile queries over
+  histogram metrics. The binary is fetched into the shared user_scripts volume
+  by the init-clickhouse service.
+
+  The filename matters: the image's default
+  `user_defined_executable_functions_config` is the glob `*_function.*ml`, so
+  this file is picked up from /etc/clickhouse-server/ without any extra config.
+-->
+<functions>
+    <function>
+        <type>executable</type>
+        <name>histogramQuantile</name>
+        <return_type>Float64</return_type>
+        <argument>
+            <type>Array(Float64)</type>
+            <name>buckets</name>
+        </argument>
+        <argument>
+            <type>Array(Float64)</type>
+            <name>counts</name>
+        </argument>
+        <argument>
+            <type>Float64</type>
+            <name>quantile</name>
+        </argument>
+        <format>CSV</format>
+        <command>./histogramQuantile</command>
+    </function>
+</functions>

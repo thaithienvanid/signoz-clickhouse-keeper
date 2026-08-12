@@ -1,0 +1,229 @@
+# SigNoz — single-node deployment backed by ClickHouse Keeper.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#
+# Tables are created as Replicated* against a one-replica cluster named
+# `cluster`. That name is not cosmetic: the schema migrator, the collector and
+# the SigNoz backend all default to a ClickHouse cluster literally named
+# `cluster`, so `clickhouse/config.d/signoz.xml` must keep it.
+#
+# Optional overlays (see ../security/README.md):
+#   docker compose -f docker-compose.yaml -f ../security/compose.tls.yaml up -d
+
+name: signoz
+
+x-common: &common
+  networks: [signoz-net]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+x-clickhouse-env: &clickhouse-env
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in .env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+  # Grant the SigNoz user the RBAC rights the schema migrator needs for
+  # CREATE DATABASE ... ON CLUSTER.
+  CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Downloads the histogramQuantile UDF that SigNoz's percentile queries call.
+  # Runs once into a shared volume; ClickHouse mounts that volume read-only.
+  # ──────────────────────────────────────────────────────────────────────────
+  init-clickhouse:
+    <<: *common
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+    container_name: signoz-init-clickhouse
+    restart: on-failure
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        version="v0.0.1"
+        if [ -x /var/lib/clickhouse/user_scripts/histogramQuantile ]; then
+          echo "histogramQuantile already present, nothing to do"
+          exit 0
+        fi
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        echo "fetching histogram-quantile $${version} for $${node_os}/$${node_arch}"
+        cd /tmp
+        wget -O histogram-quantile.tar.gz \
+          "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        tar -xzf histogram-quantile.tar.gz
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
+        chmod +x /var/lib/clickhouse/user_scripts/histogramQuantile
+    volumes:
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Coordination. One node here; see ../ha for a real 3-node Raft quorum.
+  # ──────────────────────────────────────────────────────────────────────────
+  clickhouse-keeper:
+    <<: *common
+    image: clickhouse/clickhouse-keeper:${CLICKHOUSE_KEEPER_VERSION}
+    container_name: signoz-clickhouse-keeper
+    hostname: clickhouse-keeper
+    entrypoint:
+      - /usr/bin/clickhouse-keeper
+      - --config-file=/etc/clickhouse-keeper/keeper_config.xml
+    volumes:
+      - ./keeper/keeper-config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - clickhouse-keeper-data:/var/lib/clickhouse-keeper
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-keeper-client -h localhost -p 9181 -q ruok | grep -q imok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "${KEEPER_CPU_LIMIT:-1}"
+          memory: ${KEEPER_MEMORY_LIMIT:-1g}
+
+  clickhouse:
+    <<: *common
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+    container_name: signoz-clickhouse
+    hostname: clickhouse
+    depends_on:
+      init-clickhouse: {condition: service_completed_successfully}
+      clickhouse-keeper: {condition: service_healthy}
+    environment: *clickhouse-env
+    volumes:
+      # Drop-in overlay, NOT a full config.xml replacement. The image's own
+      # config.xml (and its docker_related_config.xml, which is what makes
+      # ClickHouse listen on 0.0.0.0) stays intact underneath.
+      - ./clickhouse/config.d/signoz.xml:/etc/clickhouse-server/config.d/signoz.xml:ro
+      # Matches the image default `*_function.*ml` glob.
+      - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml:ro
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts:ro
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    deploy:
+      resources:
+        limits:
+          cpus: "${CLICKHOUSE_CPU_LIMIT:-4}"
+          memory: ${CLICKHOUSE_MEMORY_LIMIT:-8g}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Schema migrations. `migrate ready` blocks until every node of the cluster
+  # answers, so this is what actually gates the rest of the stack.
+  # ──────────────────────────────────────────────────────────────────────────
+  schema-migrator:
+    <<: *common
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTEL_COLLECTOR_VERSION}
+    container_name: signoz-schema-migrator
+    restart: on-failure
+    depends_on:
+      clickhouse: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /signoz-otel-collector migrate ready &&
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: tcp://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION: "true"
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+
+  signoz:
+    <<: *common
+    image: signoz/signoz:${SIGNOZ_VERSION}
+    container_name: signoz
+    depends_on:
+      schema-migrator: {condition: service_completed_successfully}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${SIGNOZ_UI_PORT:-8080}:8080"
+    volumes:
+      - signoz-sqlite:/var/lib/signoz
+    environment:
+      SIGNOZ_TELEMETRYSTORE_PROVIDER: clickhouse
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: tcp://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_SQLSTORE_PROVIDER: sqlite
+      SIGNOZ_SQLSTORE_SQLITE_PATH: /var/lib/signoz/signoz.db
+      # To restrict browser origins, set a comma-separated list of
+      # scheme://host[:port] values (a bare "*" fails config validation):
+      #   SIGNOZ_GLOBAL_ALLOWED__ORIGINS: https://signoz.example.com
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${SIGNOZ_CPU_LIMIT:-2}"
+          memory: ${SIGNOZ_MEMORY_LIMIT:-2g}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Ingestion gateway. Talks OpAMP back to SigNoz so log pipelines configured
+  # in the UI reach the collector; without --manager-config that breaks.
+  # ──────────────────────────────────────────────────────────────────────────
+  otel-collector:
+    <<: *common
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTEL_COLLECTOR_VERSION}
+    container_name: signoz-otel-collector
+    depends_on:
+      signoz: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector \
+          --config=/etc/otel-collector-config.yaml \
+          --manager-config=/etc/opamp-config.yaml \
+          --copy-path=/var/tmp/collector-config.yaml
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_GRPC_PORT:-4317}:4317"
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./collector/config.yaml:/etc/otel-collector-config.yaml:ro
+      - ./collector/opamp.yaml:/etc/opamp-config.yaml:ro
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: tcp://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+      CLICKHOUSE_DSN_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_DSN_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      LOW_CARDINAL_EXCEPTION_GROUPING: ${LOW_CARDINAL_EXCEPTION_GROUPING:-false}
+      MEMORY_LIMITER_MIB: ${MEMORY_LIMITER_MIB:-1600}
+      MEMORY_LIMITER_SPIKE_MIB: ${MEMORY_LIMITER_SPIKE_MIB:-320}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "${COLLECTOR_CPU_LIMIT:-2}"
+          memory: ${COLLECTOR_MEMORY_LIMIT:-2g}
+
+networks:
+  signoz-net:
+    name: signoz-net
+
+volumes:
+  clickhouse-data:
+  clickhouse-keeper-data:
+  clickhouse-user-scripts:
+  signoz-sqlite:

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!--
+  Node-specific replica identity for clickhouse-3.
+
+  ReplicatedMergeTree builds its Keeper paths from these macros:
+    /clickhouse/tables/{shard}/<db>/<table>  ->  replica {replica}
+
+  Every node therefore needs a DIFFERENT <replica> value. Mounting one shared
+  macros file on all three nodes - a common copy-paste error - makes all of
+  them claim to be the same replica of the same shard. Replication silently
+  does not happen and the nodes fight over the same Keeper znode.
+
+  <shard> is 01 on every node here because this cluster is one shard with
+  three replicas. Add shards and the shard values diverge too.
+-->
+<clickhouse>
+    <macros>
+        <shard>01</shard>
+        <replica>replica-03</replica>
+    </macros>
+</clickhouse>

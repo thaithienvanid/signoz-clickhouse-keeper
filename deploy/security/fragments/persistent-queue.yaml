@@ -1,0 +1,50 @@
+# Durable ingestion queue.
+#
+#   scripts/apply-security.sh standalone persistent-queue
+#
+# By default the ClickHouse exporters run with sending_queue disabled: they
+# batch and retry in-process, and anything still in flight is lost if the
+# collector restarts or ClickHouse is down long enough to exhaust retries.
+#
+# This fragment backs the queue with file_storage, so batches survive a
+# collector restart and drain when ClickHouse returns. The cost is disk I/O on
+# the ingest path and a volume to look after — worth it when you cannot ask
+# clients to resend, not worth it for a dev box.
+#
+# The compose overlay mounts a named volume at /var/lib/otelcol/queue. A
+# bind-mounted host directory works too, but it must be writable by the
+# collector's uid.
+
+extensions:
+  file_storage/queue:
+    directory: /var/lib/otelcol/queue
+    timeout: 10s
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol/queue
+      max_transaction_size: 65536
+
+exporters:
+  clickhousetraces:
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      num_consumers: 10
+      queue_size: 1000
+
+  signozclickhousemetrics:
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      num_consumers: 10
+      queue_size: 1000
+
+  clickhouselogsexporter:
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+      num_consumers: 10
+      queue_size: 1000
+
+service:
+  extensions: [file_storage/queue]

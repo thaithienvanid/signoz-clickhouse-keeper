@@ -1,0 +1,359 @@
+# SigNoz — high-availability deployment on ClickHouse Keeper.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#
+# Topology
+#   3x ClickHouse Keeper  — Raft quorum, tolerates 1 failure
+#   3x ClickHouse         — one shard, three replicas (full copy on each node)
+#   2x SigNoz backend     — behind nginx, sharing a Postgres metastore
+#   2x OTel Collector     — behind nginx
+#   1x nginx              — the only service that publishes ports
+#
+# This file runs the whole cluster on one Docker host, which is the right shape
+# for testing failover behaviour but is NOT fault tolerant: the host is a single
+# point of failure. To go to real production, split it across three machines —
+# see ../../docs/production.md.
+
+name: signoz-ha
+
+x-common: &common
+  networks: [signoz-ha-net]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+x-keeper: &keeper
+  <<: *common
+  image: clickhouse/clickhouse-keeper:${CLICKHOUSE_KEEPER_VERSION}
+  healthcheck:
+    test: ["CMD-SHELL", "clickhouse-keeper-client -h localhost -p 9181 -q ruok | grep -q imok"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 40s
+  deploy:
+    resources:
+      limits:
+        cpus: "${KEEPER_CPU_LIMIT:-1}"
+        memory: ${KEEPER_MEMORY_LIMIT:-1g}
+
+x-clickhouse: &clickhouse
+  <<: *common
+  image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+  environment:
+    CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in .env}
+    CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+    CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 40s
+  ulimits:
+    nofile: {soft: 262144, hard: 262144}
+  deploy:
+    resources:
+      limits:
+        cpus: "${CLICKHOUSE_CPU_LIMIT:-4}"
+        memory: ${CLICKHOUSE_MEMORY_LIMIT:-8g}
+
+x-clickhouse-dsn: &clickhouse-dsn
+  tcp://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000
+
+x-signoz: &signoz
+  <<: *common
+  image: signoz/signoz:${SIGNOZ_VERSION}
+  depends_on:
+    postgres: {condition: service_healthy}
+    schema-migrator: {condition: service_completed_successfully}
+  environment:
+    SIGNOZ_TELEMETRYSTORE_PROVIDER: clickhouse
+    SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: *clickhouse-dsn
+    SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_CLUSTER: cluster
+    SIGNOZ_SQLSTORE_PROVIDER: postgres
+    SIGNOZ_SQLSTORE_POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 60s
+  deploy:
+    resources:
+      limits:
+        cpus: "${SIGNOZ_CPU_LIMIT:-2}"
+        memory: ${SIGNOZ_MEMORY_LIMIT:-2g}
+
+x-collector: &collector
+  <<: *common
+  image: signoz/signoz-otel-collector:${SIGNOZ_OTEL_COLLECTOR_VERSION}
+  volumes:
+    - ./collector/config.yaml:/etc/otel-collector-config.yaml:ro
+  environment:
+    SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: *clickhouse-dsn
+    SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+    SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+    CLICKHOUSE_DSN_HOSTS: clickhouse-1:9000,clickhouse-2:9000,clickhouse-3:9000
+    CLICKHOUSE_DSN_USER: ${CLICKHOUSE_USER}
+    CLICKHOUSE_DSN_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    LOW_CARDINAL_EXCEPTION_GROUPING: ${LOW_CARDINAL_EXCEPTION_GROUPING:-false}
+    MEMORY_LIMITER_MIB: ${MEMORY_LIMITER_MIB:-1600}
+    MEMORY_LIMITER_SPIKE_MIB: ${MEMORY_LIMITER_SPIKE_MIB:-320}
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 30s
+  deploy:
+    resources:
+      limits:
+        cpus: "${COLLECTOR_CPU_LIMIT:-2}"
+        memory: ${COLLECTOR_MEMORY_LIMIT:-2g}
+
+services:
+  # ── Coordination quorum ───────────────────────────────────────────────────
+  clickhouse-keeper-1:
+    <<: *keeper
+    container_name: signoz-keeper-1
+    hostname: clickhouse-keeper-1
+    entrypoint: [/usr/bin/clickhouse-keeper, --config-file=/etc/clickhouse-keeper/keeper_config.xml]
+    volumes:
+      - ./keeper/keeper-1.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper-data-1:/var/lib/clickhouse-keeper
+
+  clickhouse-keeper-2:
+    <<: *keeper
+    container_name: signoz-keeper-2
+    hostname: clickhouse-keeper-2
+    entrypoint: [/usr/bin/clickhouse-keeper, --config-file=/etc/clickhouse-keeper/keeper_config.xml]
+    volumes:
+      - ./keeper/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper-data-2:/var/lib/clickhouse-keeper
+
+  clickhouse-keeper-3:
+    <<: *keeper
+    container_name: signoz-keeper-3
+    hostname: clickhouse-keeper-3
+    entrypoint: [/usr/bin/clickhouse-keeper, --config-file=/etc/clickhouse-keeper/keeper_config.xml]
+    volumes:
+      - ./keeper/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper-data-3:/var/lib/clickhouse-keeper
+
+  # ── Histogram UDF, shared by all three ClickHouse nodes ───────────────────
+  # On a real multi-host deployment this volume is not shared; run one of these
+  # per host, or bake the binary into an image.
+  init-clickhouse:
+    <<: *common
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+    container_name: signoz-ha-init-clickhouse
+    restart: on-failure
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        version="v0.0.1"
+        if [ -x /var/lib/clickhouse/user_scripts/histogramQuantile ]; then
+          echo "histogramQuantile already present, nothing to do"
+          exit 0
+        fi
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        echo "fetching histogram-quantile $${version} for $${node_os}/$${node_arch}"
+        cd /tmp
+        wget -O histogram-quantile.tar.gz \
+          "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F$${version}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        tar -xzf histogram-quantile.tar.gz
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
+        chmod +x /var/lib/clickhouse/user_scripts/histogramQuantile
+    volumes:
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts
+
+  # ── Replicated ClickHouse ─────────────────────────────────────────────────
+  # Each node mounts the shared cluster.xml plus its OWN macros file. Mounting
+  # one macros file everywhere would make all three claim the same replica
+  # identity and replication would silently not happen.
+  clickhouse-1:
+    <<: *clickhouse
+    container_name: signoz-clickhouse-1
+    hostname: clickhouse-1
+    depends_on:
+      init-clickhouse: {condition: service_completed_successfully}
+      clickhouse-keeper-1: {condition: service_healthy}
+      clickhouse-keeper-2: {condition: service_healthy}
+      clickhouse-keeper-3: {condition: service_healthy}
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/macros-1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml:ro
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts:ro
+      - clickhouse-data-1:/var/lib/clickhouse
+
+  clickhouse-2:
+    <<: *clickhouse
+    container_name: signoz-clickhouse-2
+    hostname: clickhouse-2
+    depends_on:
+      init-clickhouse: {condition: service_completed_successfully}
+      clickhouse-keeper-1: {condition: service_healthy}
+      clickhouse-keeper-2: {condition: service_healthy}
+      clickhouse-keeper-3: {condition: service_healthy}
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/macros-2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml:ro
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts:ro
+      - clickhouse-data-2:/var/lib/clickhouse
+
+  clickhouse-3:
+    <<: *clickhouse
+    container_name: signoz-clickhouse-3
+    hostname: clickhouse-3
+    depends_on:
+      init-clickhouse: {condition: service_completed_successfully}
+      clickhouse-keeper-1: {condition: service_healthy}
+      clickhouse-keeper-2: {condition: service_healthy}
+      clickhouse-keeper-3: {condition: service_healthy}
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/macros-3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml:ro
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts:ro
+      - clickhouse-data-3:/var/lib/clickhouse
+
+  # ── Metastore ─────────────────────────────────────────────────────────────
+  postgres:
+    <<: *common
+    image: postgres:${POSTGRES_VERSION}
+    container_name: signoz-postgres
+    hostname: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-signoz}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Schema migrations, run once against the cluster ───────────────────────
+  # --replication is on (the default) so tables are created as Replicated*
+  # ON CLUSTER cluster, which is the whole point of the Keeper quorum.
+  schema-migrator:
+    <<: *common
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTEL_COLLECTOR_VERSION}
+    container_name: signoz-ha-schema-migrator
+    restart: on-failure
+    depends_on:
+      clickhouse-1: {condition: service_healthy}
+      clickhouse-2: {condition: service_healthy}
+      clickhouse-3: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /signoz-otel-collector migrate ready &&
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: *clickhouse-dsn
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION: "true"
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+
+  # ── Query / UI tier ───────────────────────────────────────────────────────
+  signoz-1:
+    <<: *signoz
+    container_name: signoz-1
+    hostname: signoz-1
+
+  signoz-2:
+    <<: *signoz
+    container_name: signoz-2
+    hostname: signoz-2
+
+  # ── Ingestion tier ────────────────────────────────────────────────────────
+  # Each collector holds its OpAMP session with a different backend so a single
+  # backend restart does not disconnect both at once.
+  otel-collector-1:
+    <<: *collector
+    container_name: signoz-otel-collector-1
+    hostname: otel-collector-1
+    depends_on:
+      signoz-1: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector \
+          --config=/etc/otel-collector-config.yaml \
+          --manager-config=/etc/opamp-config.yaml \
+          --copy-path=/var/tmp/collector-config.yaml
+    volumes:
+      - ./collector/config.yaml:/etc/otel-collector-config.yaml:ro
+      - ./collector/opamp-1.yaml:/etc/opamp-config.yaml:ro
+
+  otel-collector-2:
+    <<: *collector
+    container_name: signoz-otel-collector-2
+    hostname: otel-collector-2
+    depends_on:
+      signoz-2: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector \
+          --config=/etc/otel-collector-config.yaml \
+          --manager-config=/etc/opamp-config.yaml \
+          --copy-path=/var/tmp/collector-config.yaml
+    volumes:
+      - ./collector/config.yaml:/etc/otel-collector-config.yaml:ro
+      - ./collector/opamp-2.yaml:/etc/opamp-config.yaml:ro
+
+  # ── Edge ──────────────────────────────────────────────────────────────────
+  # The only service with published ports. Terminate TLS here in production
+  # (see ../security/) rather than on each collector.
+  loadbalancer:
+    <<: *common
+    image: nginx:${NGINX_VERSION}
+    container_name: signoz-lb
+    depends_on:
+      otel-collector-1: {condition: service_healthy}
+      otel-collector-2: {condition: service_healthy}
+      signoz-1: {condition: service_healthy}
+      signoz-2: {condition: service_healthy}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${SIGNOZ_UI_PORT:-8080}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_GRPC_PORT:-4317}:4317"
+      - "${BIND_ADDRESS:-127.0.0.1}:${OTLP_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./loadbalancer/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  signoz-ha-net:
+    name: signoz-ha-net
+
+volumes:
+  keeper-data-1:
+  keeper-data-2:
+  keeper-data-3:
+  clickhouse-data-1:
+  clickhouse-data-2:
+  clickhouse-data-3:
+  clickhouse-user-scripts:
+  postgres-data:

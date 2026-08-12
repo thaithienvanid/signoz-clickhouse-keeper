@@ -1,0 +1,105 @@
+<?xml version="1.0"?>
+<!--
+  SigNoz overlay for ClickHouse, merged on top of the image's own config.xml.
+
+  It is a drop-in, not a replacement: the image already sets listen_host and
+  the standard paths in /etc/clickhouse-server/config.d/docker_related_config.xml.
+  Replacing config.xml wholesale (as older SigNoz guides did) drops those and
+  leaves ClickHouse listening on localhost only.
+-->
+<clickhouse>
+    <!-- Coordination. The element is still called <zookeeper> for protocol
+         compatibility; it points at ClickHouse Keeper here. -->
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper</host>
+            <port>9181</port>
+        </node>
+        <session_timeout_ms>30000</session_timeout_ms>
+        <operation_timeout_ms>10000</operation_timeout_ms>
+    </zookeeper>
+
+    <!--
+      Replica identity. ReplicatedMergeTree substitutes these into its Keeper
+      paths, so every node in a cluster needs a UNIQUE pair. One node here, so
+      the values are fixed; the HA stack ships one file per node.
+    -->
+    <macros>
+        <shard>01</shard>
+        <replica>replica-01</replica>
+    </macros>
+
+    <!--
+      Cluster topology. The name MUST be `cluster`: signoz-otel-collector's
+      migrate commands default to a ClickHouse cluster named `cluster`, and so
+      does the backend (telemetrystore.clickhouse.cluster). Naming it
+      cluster_1S_1R (as older guides did) makes `migrate ready` find no hosts
+      in system.clusters and hang until it times out.
+    -->
+    <remote_servers>
+        <cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </cluster>
+    </remote_servers>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+        <!-- Reap finished DDL entries so the Keeper znode does not grow without
+             bound. Seconds. -->
+        <cleanup_delay_period>604800</cleanup_delay_period>
+        <task_max_lifetime>604800</task_max_lifetime>
+    </distributed_ddl>
+
+    <!--
+      ClickHouse's own system logs are unbounded by default and on a busy
+      observability box they can outgrow the telemetry they describe. One day
+      of retention is plenty for debugging.
+    -->
+    <query_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+    </query_log>
+    <trace_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+    </trace_log>
+    <query_thread_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </query_thread_log>
+    <query_views_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </query_views_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </part_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <session_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </session_log>
+    <text_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+        <flush_interval_milliseconds>30000</flush_interval_milliseconds>
+    </text_log>
+    <zookeeper_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </zookeeper_log>
+    <processors_profile_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </processors_profile_log>
+    <error_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </error_log>
+</clickhouse>

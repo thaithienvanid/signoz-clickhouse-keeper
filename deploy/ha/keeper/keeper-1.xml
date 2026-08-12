@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse Keeper node 1 of a 3-node Raft quorum.
+
+  Only <server_id> differs between keeper-1/2/3.xml; <raft_configuration> is
+  identical on every node and must stay that way - each member has to agree on
+  the full membership list or the cluster will not form.
+
+  Quorum is 2 of 3: one node can be lost with no loss of availability, two
+  cannot. Never run an even number of Keeper nodes; 4 nodes tolerate the same
+  single failure as 3 while adding another thing to break.
+-->
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>true</console>
+    </logger>
+
+    <listen_host>0.0.0.0</listen_host>
+
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+
+        <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+
+        <!-- Read-only subset of the four-letter commands; the default list also
+             allows mutating ones (crst, srst, rcvr, rqld, ydld, clrs). -->
+        <four_letter_word_allow_list>conf,cons,envi,ruok,srvr,stat,wchs,dirs,mntr,isro,apiv,lgif</four_letter_word_allow_list>
+
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <raft_logs_level>warning</raft_logs_level>
+
+            <snapshot_distance>100000</snapshot_distance>
+            <reserved_log_items>100000</reserved_log_items>
+            <snapshots_to_keep>3</snapshots_to_keep>
+
+            <!-- Compression settings belong inside coordination_settings.
+                 Placed directly under keeper_server they are ignored. -->
+            <compress_logs>true</compress_logs>
+            <compress_snapshots_with_zstd_format>true</compress_snapshots_with_zstd_format>
+
+            <heart_beat_interval_ms>500</heart_beat_interval_ms>
+            <election_timeout_lower_bound_ms>1000</election_timeout_lower_bound_ms>
+            <election_timeout_upper_bound_ms>2000</election_timeout_upper_bound_ms>
+            <dead_session_check_period_ms>500</dead_session_check_period_ms>
+
+            <!-- fsync each Raft write before acknowledging. Costs latency and
+                 is the setting that makes a quorum actually durable across a
+                 simultaneous power loss. Leave it on in production. -->
+            <force_sync>true</force_sync>
+
+            <!-- Give a restarting node time to catch up with the leader before
+                 declaring startup failed. Milliseconds. -->
+            <startup_timeout>240000</startup_timeout>
+        </coordination_settings>
+
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>clickhouse-keeper-1</hostname>
+                <port>9234</port>
+            </server>
+            <server>
+                <id>2</id>
+                <hostname>clickhouse-keeper-2</hostname>
+                <port>9234</port>
+            </server>
+            <server>
+                <id>3</id>
+                <hostname>clickhouse-keeper-3</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+</clickhouse>

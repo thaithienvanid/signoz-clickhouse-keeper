@@ -1,0 +1,152 @@
+# SigNoz OTel Collector — ingestion gateway (HA).
+#
+# Shared by every collector replica; the only per-replica file is opamp-N.yaml,
+# which picks which SigNoz backend holds the OpAMP session.
+#
+# CLICKHOUSE_DSN_HOSTS lists all three ClickHouse replicas. clickhouse-go
+# splits it on commas and fails over between them, so losing one node does not
+# stop ingestion. Writes land on whichever replica answers and are replicated
+# to the others through Keeper.
+#
+# This is the *bootstrap* config. Once the collector connects to SigNoz over
+# OpAMP the log-parsing pipelines you build in the UI are merged in at runtime
+# and written to --copy-path. Edit this file for anything the UI cannot
+# express: receivers, auth, TLS, resource limits.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # Default is 4 MiB; raise it or large batches are rejected outright.
+        max_recv_msg_size_mib: 16
+        keepalive:
+          server_parameters:
+            max_connection_idle: 60s
+            max_connection_age: 300s
+            max_connection_age_grace: 30s
+            time: 120s
+            timeout: 20s
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          # Only needed for browser (RUM) clients. Narrow this to your own
+          # origins in production — "*" lets any page post telemetry.
+          allowed_origins: ["*"]
+          allowed_headers: ["*"]
+
+processors:
+  # Must stay first in every pipeline: it can only shed load it sees before
+  # anything else has buffered it.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: ${env:MEMORY_LIMITER_MIB}
+    spike_limit_mib: ${env:MEMORY_LIMITER_SPIKE_MIB}
+
+  batch:
+    send_batch_size: 50000
+    send_batch_max_size: 55000
+    timeout: 5s
+
+  batch/meter:
+    send_batch_size: 20000
+    send_batch_max_size: 25000
+    timeout: 5s
+
+  # Generates SigNoz's RED metrics (rate / errors / duration) from spans.
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
+    metrics_flush_interval: 60s
+    latency_histogram_buckets:
+      [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s]
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+    enable_exp_histogram: true
+    dimensions:
+      - name: service.namespace
+        default: default
+      - name: deployment.environment
+        default: default
+      - name: signoz.collector.id
+      - name: service.version
+
+connectors:
+  # Feeds SigNoz's own usage/metering views.
+  signozmeter:
+    metrics_flush_interval: 1h
+    dimensions:
+      - name: service.name
+      - name: deployment.environment
+      - name: host.name
+
+exporters:
+  clickhousetraces:
+    datasource: tcp://${env:CLICKHOUSE_DSN_USER}:${env:CLICKHOUSE_DSN_PASSWORD}@${env:CLICKHOUSE_DSN_HOSTS}/signoz_traces
+    low_cardinal_exception_grouping: ${env:LOW_CARDINAL_EXCEPTION_GROUPING}
+    use_new_schema: true
+    timeout: 45s
+    sending_queue:
+      # Deliberately off: the ClickHouse exporters batch and retry internally,
+      # and an in-memory queue on top only adds data to lose on restart.
+      # For durability across restarts use a persistent queue instead — see
+      # ../../security/README.md ➜ "Durable ingestion queue".
+      enabled: false
+
+  signozclickhousemetrics:
+    dsn: tcp://${env:CLICKHOUSE_DSN_USER}:${env:CLICKHOUSE_DSN_PASSWORD}@${env:CLICKHOUSE_DSN_HOSTS}/signoz_metrics
+    timeout: 45s
+    sending_queue:
+      enabled: false
+
+  clickhouselogsexporter:
+    dsn: tcp://${env:CLICKHOUSE_DSN_USER}:${env:CLICKHOUSE_DSN_PASSWORD}@${env:CLICKHOUSE_DSN_HOSTS}/signoz_logs
+    use_new_schema: true
+    timeout: 45s
+    sending_queue:
+      enabled: false
+
+  signozclickhousemeter:
+    dsn: tcp://${env:CLICKHOUSE_DSN_USER}:${env:CLICKHOUSE_DSN_PASSWORD}@${env:CLICKHOUSE_DSN_HOSTS}/signoz_meter
+    timeout: 45s
+    sending_queue:
+      enabled: false
+
+  # Populates the attribute/field autocomplete the UI query builder reads.
+  metadataexporter:
+    dsn: tcp://${env:CLICKHOUSE_DSN_USER}:${env:CLICKHOUSE_DSN_PASSWORD}@${env:CLICKHOUSE_DSN_HOSTS}/signoz_metadata
+    enabled: true
+    timeout: 45s
+    cache:
+      provider: in_memory
+
+extensions:
+  signoz_health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+service:
+  extensions: [signoz_health_check, pprof]
+  telemetry:
+    logs:
+      encoding: json
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, signozspanmetrics/delta, batch]
+      exporters: [clickhousetraces, signozmeter, metadataexporter]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [signozclickhousemetrics, signozmeter, metadataexporter]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouselogsexporter, signozmeter, metadataexporter]
+
+    metrics/meter:
+      receivers: [signozmeter]
+      processors: [batch/meter]
+      exporters: [signozclickhousemeter]

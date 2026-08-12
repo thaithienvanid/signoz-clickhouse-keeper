@@ -1,0 +1,4 @@
+# OpAMP control channel: the collector registers with the SigNoz backend and
+# receives log-pipeline configuration built in the UI. SigNoz serves the
+# WebSocket on port 4320 (in-cluster only — it is not published to the host).
+server_endpoint: ws://signoz:4320/v1/opamp
