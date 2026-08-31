@@ -136,10 +136,10 @@ up -d --wait` will therefore either come up clean or fail loudly.
 |---|---|---|
 | `clickhouse/clickhouse-server` | `25.12.5` | **Hard requirement.** See below. |
 | `clickhouse/clickhouse-keeper` | `25.12.5` | Must match the server |
-| `signoz/signoz` | `v0.136.1` | Latest release |
-| `signoz/signoz-otel-collector` | `v0.144.8` | Latest release; also supplies the schema migrator |
+| `signoz/signoz` | `v0.139.0` | Latest release |
+| `signoz/signoz-otel-collector` | `v0.144.9` | Latest release; also supplies the schema migrator |
 | `postgres` (HA) | `16-alpine` | Metastore |
-| `nginx` (HA) | `1.29-alpine` | Load balancer |
+| `nginx` (HA) | `1.30-alpine` | Load balancer |
 
 **ClickHouse is not "whatever is newest".** SigNoz's deployment tool declares a
 compatibility rule ([`foundry/internal/compat/installation/compat.go`](https://github.com/SigNoz/foundry/blob/main/internal/compat/installation/compat.go)):

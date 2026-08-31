@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-08-31 — SigNoz v0.139.0
+
+Version bumps only; no topology, config or script changes.
+
+- **`signoz/signoz` `v0.136.1` → `v0.139.0`.** Four releases (v0.137.0,
+  v0.137.1, v0.138.0, v0.139.0). Nothing in the range touches `conf/` or the
+  configuration keys this repo sets — `SIGNOZ_TELEMETRYSTORE_*`,
+  `SIGNOZ_SQLSTORE_*` and `SIGNOZ_OTEL_COLLECTOR_*` all still resolve. The range
+  adds metastore migrations 108–117 (dashboard and saved-view restructuring,
+  auth-domain config, orphan user roles, Lambda dashboards), which the backend
+  applies on startup. Forward-only, as always: take a backup first.
+- **`signoz/signoz-otel-collector` `v0.144.8` → `v0.144.9`.** A single fix in
+  `clickhouselogsexporter` — non-map log bodies are wrapped instead of failing
+  the whole batch. No ClickHouse schema migrations, no collector config changes.
+- **`nginx` (HA) `1.29-alpine` → `1.30-alpine`.** 1.29 was a mainline release
+  and has been superseded twice over; 1.30 is the current stable branch, which
+  is what the version policy asks for. `.github/workflows/validate.yml` pins the
+  same tag for its `nginx -t` check and moves with it.
+- **ClickHouse stays at `25.12.5`.** The compatibility rule in
+  `SigNoz/foundry` (`internal/compat/installation/compat.go`) is unchanged —
+  collector `> 0.144.5` still requires clickhouse `= 25.12.5` — and Foundry's
+  own defaults still pin `clickhouse/clickhouse-server:25.12.5` and
+  `clickhouse/clickhouse-keeper:25.12.5`. Newer ClickHouse tags exist; they are
+  still outside what SigNoz tests.
+
+Removed endpoints in the v0.139.0 range (deprecated user, service-account
+nested-role and v1 infra-monitoring endpoints) are API surface, not deployment
+surface — nothing in this repo calls them. If you script against the SigNoz
+API, check those before upgrading.
+
 ## 2026-08-12 — Fixes from the first real CI run
 
 The end-to-end job in `.github/workflows/validate.yml` stood the standalone
