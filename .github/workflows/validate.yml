@@ -29,6 +29,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends libxml2-utils shellcheck
           python3 -m pip install --quiet pyyaml
 
+      # Lets validate.sh forge deploy/foundry/casting.yaml, so the migration
+      # target in docs/foundry.md cannot rot unnoticed. Pinned to the version
+      # the runbook was checked against.
+      - name: Install foundryctl
+        env:
+          FOUNDRY_VERSION: v0.3.0
+        run: |
+          curl -fsSL "https://github.com/SigNoz/foundry/releases/download/${FOUNDRY_VERSION}/foundry_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/foundry_linux_amd64/bin" >> "$GITHUB_PATH"
+
       - name: Static validation
         run: ./scripts/validate.sh
 

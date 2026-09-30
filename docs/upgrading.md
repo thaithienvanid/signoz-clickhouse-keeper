@@ -186,8 +186,8 @@ here are cross-checked against Foundry's output, so you get the same deployment
 shape and keep the files under your own review process — at the cost of
 tracking upstream changes yourself.
 
-Migrating to Foundry later is straightforward: your volumes carry the data, and
-Foundry's [migration guide](https://github.com/SigNoz/signoz/blob/main/deploy/MIGRATION.md)
-covers reattaching them. Note that its examples reattach a *ZooKeeper* volume;
-coming from here you will be reattaching Keeper's, and you will need the
-`macros` values from your `config.d/macros-*.xml` to match your existing data.
+Migrating to Foundry later is a backup and restore, not a volume reattach:
+this repo's ClickHouse macros, Keeper server id and volume names all differ
+from what Foundry generates. Reattaching the volumes leaves replicated tables
+read-only. [foundry.md](foundry.md) is the runbook for the standalone stack,
+with a casting that matches this repo's pins and a rollback that is `make up`.

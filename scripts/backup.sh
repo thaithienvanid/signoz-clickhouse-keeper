@@ -134,7 +134,7 @@ for line in sys.stdin:
     echo "clickhouse backups:"
 } >> "${DEST}/MANIFEST.txt"
 
-for db in signoz_traces signoz_metrics signoz_logs signoz_metadata signoz_meter; do
+for db in signoz_traces signoz_metrics signoz_logs signoz_metadata signoz_meter signoz_analytics; do
     if ! ch_query "EXISTS DATABASE ${db}" | grep -q 1; then
         echo "    ${db}: absent, skipping"
         continue
