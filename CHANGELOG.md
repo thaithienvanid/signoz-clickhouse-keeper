@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-09-30 — Foundry migration runbook; backups now include alert history
+
+- **`scripts/backup.sh` never backed up `signoz_analytics`.** That database
+  holds `rule_state_history_v0`, the alert state history (firing and resolved
+  transitions over time). Every backup taken from this repo so far restores
+  alert rules (they live in the metastore) but loses their history. The
+  database list now includes it, and `restore.sh` needs no change: it restores
+  whatever archives the backup holds. Take a fresh backup if alert history
+  matters to you.
+- **New: [`docs/foundry.md`](docs/foundry.md)**, a runbook for moving the
+  standalone stack onto SigNoz Foundry. It covers when to move and what
+  Foundry's compose output does not do that this repo does (ClickHouse auth,
+  `memory_limiter`, resource limits, the Keeper four-letter-word allow-list,
+  the security overlays, an HA load balancer). The migration is a
+  `backup.sh` backup restored into a fresh Foundry stack, with `make up` as
+  the rollback.
+- **Why not reattach volumes, as `docs/upgrading.md` used to suggest.** Foundry
+  generates different ClickHouse macros (`00`/`00` against `01`/`replica-01`),
+  a different Keeper server id and Raft hostname, and different volume names.
+  Replicated tables resolve their Keeper path through the macros, so
+  reattached data comes up read-only. `docs/upgrading.md` now points to the
+  runbook instead.
+- **New: [`deploy/foundry/casting.yaml`](deploy/foundry/casting.yaml)**, the
+  migration target. It pins the same images as the standalone
+  `.env.example`, uses a SQLite metastore (Foundry defaults to Postgres, and
+  there is no conversion path), adds the `backups` disk `RESTORE` needs, binds
+  ports to `127.0.0.1`, and renames the compose project to `signoz-foundry`
+  (Foundry's default, `signoz`, is also this repo's).
+- **`scripts/validate.sh` checks the casting.** It fails if the casting's pins
+  drift from `deploy/standalone/.env.example`. When `foundryctl` is installed,
+  it forges the casting and runs `docker compose config` on the result. CI
+  installs `foundryctl` v0.3.0 for this.
+
+The runbook's commands were checked against `foundryctl` v0.3.0 output, but a
+full migration has not been run end to end: nothing in CI starts a Foundry
+stack and restores into it.
+
 ## 2026-09-30 — SigNoz v0.144.0
 
 Version bumps, one required collector config change, and one upgrade that logs

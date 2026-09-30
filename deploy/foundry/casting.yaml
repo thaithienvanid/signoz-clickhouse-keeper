@@ -1,0 +1,67 @@
+# Foundry casting for migrating the STANDALONE stack to SigNoz Foundry.
+#
+# Read docs/foundry.md before using this. It is a migration target, not a
+# third stack: once you run it, Foundry owns the generated compose file.
+#
+#   foundryctl forge -f deploy/foundry/casting.yaml -p deploy/foundry/pours
+#
+# Every choice below exists to make the migration a restore of a
+# scripts/backup.sh directory, with a rollback that is just `make up`:
+#
+#   - Image pins match deploy/standalone/.env.example exactly.
+#     scripts/validate.sh fails if they drift. The backup restores ClickHouse
+#     schema and migration state as-is, so both sides must run the same
+#     collector version.
+#   - metastore: sqlite, so the standalone signoz.db is copied over rather than
+#     converted. Foundry defaults to Postgres, and there is no SQLite-to-Postgres
+#     conversion path.
+#   - A `backups` disk on ClickHouse, which RESTORE ... FROM Disk() needs.
+#   - Ports on 127.0.0.1, as in this repo. Foundry publishes on every interface.
+#   - Project name `signoz-foundry`. Foundry's default, `signoz`, is also this
+#     repo's, and the two stacks would share one compose project.
+apiVersion: v1alpha1
+metadata:
+  name: signoz
+spec:
+  deployment:
+    mode: docker
+    flavor: compose
+
+  signoz:
+    spec:
+      image: signoz/signoz:v0.144.0
+  ingester:
+    spec:
+      image: signoz/signoz-otel-collector:v0.144.12
+  telemetrystore:
+    spec:
+      image: clickhouse/clickhouse-server:25.12.5
+      config:
+        data:
+          config-0-0.yaml: |
+            storage_configuration:
+              disks:
+                backups:
+                  type: local
+                  path: /var/lib/clickhouse/backups/
+            backups:
+              allowed_disk: backups
+  telemetrykeeper:
+    kind: clickhousekeeper
+    spec:
+      image: clickhouse/clickhouse-keeper:25.12.5
+  metastore:
+    kind: sqlite
+
+  patches:
+    - target: deployment/compose.yaml
+      operations:
+        - op: replace
+          path: /name
+          value: signoz-foundry
+        - op: replace
+          path: /services/signoz-signoz-0/ports
+          value: ["127.0.0.1:8080:8080"]
+        - op: replace
+          path: /services/ingester/ports
+          value: ["127.0.0.1:4317:4317", "127.0.0.1:4318:4318"]

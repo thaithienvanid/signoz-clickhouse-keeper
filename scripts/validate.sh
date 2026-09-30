@@ -144,6 +144,50 @@ PY
     fi
 done
 
+# ── Foundry migration casting ────────────────────────────────────────────────
+# docs/foundry.md restores a standalone backup into the stack this casting
+# generates. That only works when both run identical versions, so the pins
+# must track deploy/standalone/.env.example.
+head_ "Foundry casting"
+if out=$(python3 - <<'PY' 2>&1
+import re, sys, yaml
+env = dict(re.findall(r"^([A-Z_]+_VERSION)=(\S+)$",
+                      open("deploy/standalone/.env.example").read(), re.M))
+spec = yaml.safe_load(open("deploy/foundry/casting.yaml"))["spec"]
+want = {
+    "signoz":          "signoz/signoz:" + env["SIGNOZ_VERSION"],
+    "ingester":        "signoz/signoz-otel-collector:" + env["SIGNOZ_OTEL_COLLECTOR_VERSION"],
+    "telemetrystore":  "clickhouse/clickhouse-server:" + env["CLICKHOUSE_VERSION"],
+    "telemetrykeeper": "clickhouse/clickhouse-keeper:" + env["CLICKHOUSE_KEEPER_VERSION"],
+}
+bad = [f"{k}: {spec[k]['spec'].get('image')} != {v}" for k, v in want.items()
+       if spec[k]["spec"].get("image") != v]
+sys.exit("\n".join(bad) if bad else 0)
+PY
+); then
+    pass "deploy/foundry/casting.yaml pins match deploy/standalone/.env.example"
+else
+    fail "deploy/foundry/casting.yaml pins drifted from deploy/standalone/.env.example"
+    echo "$out" | sed 's/^/        /'
+fi
+
+if ! command -v foundryctl >/dev/null 2>&1; then
+    skip "foundryctl not installed — casting not forged"
+elif ! command -v docker >/dev/null 2>&1; then
+    skip "docker not installed — forged casting not checked"
+else
+    pours=$(mktemp -d)
+    if out=$(foundryctl forge --no-ledger --no-updater --format text \
+                -f deploy/foundry/casting.yaml -p "$pours" 2>&1) \
+       && out=$(docker compose -f "$pours/deployment/compose.yaml" config -q 2>&1); then
+        pass "deploy/foundry/casting.yaml forges to a valid compose file"
+    else
+        fail "deploy/foundry/casting.yaml does not forge cleanly"
+        echo "$out" | sed 's/^/        /'
+    fi
+    rm -rf "$pours" deploy/foundry/casting.yaml.lock
+fi
+
 # ── Security fragments ───────────────────────────────────────────────────────
 head_ "security fragments"
 for stack in standalone ha; do
