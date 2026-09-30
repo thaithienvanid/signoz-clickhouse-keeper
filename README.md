@@ -87,12 +87,21 @@ graph TB
     SIG --> META
     CH <-.->|replication and<br/>distributed DDL| KPR
 
-    style SDK fill:#e3f2fd,stroke:#1565c0
-    style COL fill:#e8f5e9,stroke:#2e7d32
-    style SIG fill:#fce4ec,stroke:#ad1457
-    style META fill:#fce4ec,stroke:#ad1457
-    style CH fill:#f3e5f5,stroke:#6a1b9a
-    style KPR fill:#fff9c4,stroke:#f9a825
+    classDef client fill:#3b82f626,stroke:#3b82f6,stroke-width:2px
+    classDef ingest fill:#16a34a26,stroke:#16a34a,stroke-width:2px
+    classDef query fill:#db277726,stroke:#db2777,stroke-width:2px
+    classDef storage fill:#8b5cf626,stroke:#8b5cf6,stroke-width:2px
+    classDef coord fill:#d9770626,stroke:#d97706,stroke-width:2px
+
+    class SDK client
+    class COL ingest
+    class SIG,META query
+    class CH storage
+    class KPR coord
+    style clients fill:#80808014,stroke:#808080
+    style ingest fill:#80808014,stroke:#808080
+    style query fill:#80808014,stroke:#808080
+    style storage fill:#80808014,stroke:#808080
 ```
 
 Two links in that diagram are easy to miss and are the cause of most
@@ -117,12 +126,17 @@ graph LR
     D -->|exit 0| E["signoz"]
     E -->|healthy| F["otel-collector"]
 
-    style A fill:#e8f5e9,stroke:#2e7d32
-    style B fill:#fff9c4,stroke:#f9a825
-    style C fill:#f3e5f5,stroke:#6a1b9a
-    style D fill:#e1f5fe,stroke:#0277bd
-    style E fill:#fce4ec,stroke:#ad1457
-    style F fill:#e8f5e9,stroke:#2e7d32
+    classDef ingest fill:#16a34a26,stroke:#16a34a,stroke-width:2px
+    classDef coord fill:#d9770626,stroke:#d97706,stroke-width:2px
+    classDef storage fill:#8b5cf626,stroke:#8b5cf6,stroke-width:2px
+    classDef migrate fill:#0891b226,stroke:#0891b2,stroke-width:2px
+    classDef query fill:#db277726,stroke:#db2777,stroke-width:2px
+
+    class A,F ingest
+    class B coord
+    class C storage
+    class D migrate
+    class E query
 ```
 
 Every arrow is a real `depends_on` condition, not a suggestion. `docker compose
