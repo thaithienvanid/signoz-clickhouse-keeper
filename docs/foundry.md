@@ -271,9 +271,15 @@ with replicas generates the replica containers but no load balancer:
 - scaled ingesters lose their host ports (Foundry's docs say so);
 - each backend gets its own host port (8080, 9080, …).
 
-Asking for `telemetrystore` `replicas: 3` also produced four ClickHouse nodes.
 Foundry points at its swarm and Kubernetes castings for load-balanced
 replicas.
+
+Mind the replica count if you try it. For `telemetrystore`, Foundry counts
+`replicas` as copies *beyond the first*: `replicas: 2` gives this repo's three
+ClickHouse nodes, and `replicas: 3` gives four. Every casting (compose, swarm,
+Helm, Kustomize, systemd) applies that `+ 1`, so it is intended, but Foundry's
+casting reference does not say so. `signoz`, `ingester` and `telemetrykeeper`
+count the total, so `telemetrykeeper` `replicas: 3` is three Keepers.
 
 The same backup-and-restore principle applies to the HA stack. The metastore is
 a `pg_dump` restored with `psql`, and ClickHouse is restored on one replica and
