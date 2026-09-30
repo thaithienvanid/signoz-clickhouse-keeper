@@ -70,15 +70,22 @@ processors:
       - name: signoz.collector.id
       - name: service.version
 
-  # LLM observability (SigNoz >= v0.143.0, collector >= v0.144.6). The backend
-  # fills both processors in over OpAMP but only for pipeline entries that
-  # already exist here, so they ship empty: the mapper with no groups, the
-  # pricer with no rules. Neither alters a span until SigNoz sends it config.
+  # LLM observability (SigNoz >= v0.143.0, collector >= v0.144.6). Once an
+  # organization exists, SigNoz rewrites both definitions over OpAMP: the
+  # mapper gets its built-in gen_ai.llm / gen_ai.agent / gen_ai.tool groups,
+  # the pricer whatever rules are set in the UI. It never touches
+  # service.pipelines, so wiring them into the traces pipeline is this file's
+  # job; left out of it, they are configured and never run.
+  #
+  # Copies vendor-specific span attributes onto the gen_ai.* keys the pricer
+  # and the UI read, so it must run before the pricer.
   signozspanmapper:
     groups: []
 
   # Writes per-span token cost to the output_attrs keys, from the gen_ai.*
-  # token counts on the input side.
+  # token counts on the input side. With no rules it prices nothing, but it
+  # always drops client-sent signoz.gen_ai.* attributes: that prefix is
+  # reserved for costs the collector computes.
   signozllmpricing:
     attrs:
       model: gen_ai.request.model

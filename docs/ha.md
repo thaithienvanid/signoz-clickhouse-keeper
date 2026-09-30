@@ -84,6 +84,15 @@ graph TB
 Note the asymmetry that surprises people: losing Keeper quorum stops *writes*
 but not *reads*, while losing Postgres stops the *UI* but not *ingestion*.
 
+Sessions are opaque tokens stored in Postgres (the default from SigNoz
+v0.143.0), so they survive losing a backend. Each backend also caches tokens in
+memory and checks that cache before Postgres, so signing out or revoking a user
+through one backend does not reach the other until its cached copy is evicted
+or expires (`tokenizer.lifetime.max`, 720h by default). A shared Redis cache
+(`SIGNOZ_CACHE_PROVIDER=redis` plus `SIGNOZ_CACHE_REDIS_*`) closes that gap;
+this stack does not ship one. The JWT sessions that came before could not be
+revoked at all.
+
 ---
 
 ## Why one shard with three replicas
@@ -254,7 +263,8 @@ noting:
   for its lifetime.
 - `grpc_next_upstream error timeout non_idempotent` so a collector dying
   mid-stream retries against the other.
-- WebSocket upgrade headers on the UI route — SigNoz's live tail needs them.
+- `proxy_buffering off` on the UI route — live tail streams over server-sent
+  events, which a buffering proxy holds back.
 - `proxy_request_buffering off` — telemetry bodies are large and compressed;
   buffering them to disk adds latency for nothing.
 - Its own health endpoint on `:8081`, unpublished.
