@@ -139,7 +139,20 @@ organization yet.
 
 ## 4. Restore ClickHouse
 
-Stop everything that writes, then replace each database with the backup's copy:
+First wait for the fresh install's schema migrator to finish. Foundry's
+compose file does not order anything after it, and `up --wait` treats a
+one-shot container that is still running as ready. Dropping a database while
+the migrator is still creating tables in it gives you a half-built schema:
+
+```bash
+docker wait signoz-telemetrystore-migrator    # must print 0
+```
+
+If it prints anything else, read `$FC logs signoz-telemetrystore-migrator`
+before going further.
+
+Then stop everything that writes, and replace each database with the backup's
+copy:
 
 ```bash
 $FC stop signoz-signoz-0 ingester

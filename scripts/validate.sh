@@ -173,6 +173,8 @@ fi
 
 if ! command -v foundryctl >/dev/null 2>&1; then
     skip "foundryctl not installed — casting not forged"
+elif ! command -v docker >/dev/null 2>&1; then
+    skip "docker not installed — forged casting not checked"
 else
     pours=$(mktemp -d)
     if out=$(foundryctl forge --no-ledger --no-updater --format text \
