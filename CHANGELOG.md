@@ -1,5 +1,122 @@
 # Changelog
 
+## 2026-09-30 — SigNoz v0.144.0
+
+Version bumps, one required collector config change, and one upgrade that logs
+every user out.
+
+### Before you upgrade
+
+- **Every user is logged out once, and that closes a security hole.** v0.143.0
+  switched the default session tokenizer from `jwt` to `opaque` (server-side,
+  revocable tokens stored in the metastore); upstream marks this as breaking,
+  because JWT sessions are not valid opaque tokens. This repo never set a
+  tokenizer or `SIGNOZ_TOKENIZER_JWT_SECRET`, and before v0.143.0 the default
+  secret was empty. **Every earlier deployment from this repo therefore signed
+  its sessions with an empty HMAC key**, and SigNoz logged "CRITICAL SECURITY
+  ISSUE: No JWT secret key specified!" on every start. Upstream says such
+  sessions are "vulnerable to tampering and unauthorized access". Taking the
+  opaque default ends that: only the configured tokenizer is active, so JWTs
+  are no longer accepted. There is no way to keep the old sessions — `jwt` now
+  refuses to start without a non-empty secret, which invalidates them all the
+  same. If you are staying on an older release for now, set
+  `SIGNOZ_TOKENIZER_JWT_SECRET` (e.g. `openssl rand -hex 32`) on every backend.
+- **Take a backup: several metastore migrations cannot be reversed.** The range
+  adds migrations 118–130, applied on startup. Most add authorization tuples.
+  121 renames `notification_channel.name` to `display_name` and adds a
+  generated, unique `name`. 122 and 126 rewrite quick-filter JSON, and 128
+  overwrites the built-in roles' transaction groups. None of them has a working
+  `down`, and a pre-v0.141 binary would read the generated slug as the channel
+  name. As always, `make backup` is the rollback.
+
+### Versions
+
+- **`signoz/signoz` `v0.139.0` → `v0.144.0`.** Seven releases (v0.140.0,
+  v0.141.0, v0.141.1, v0.142.0, v0.142.1, v0.143.0, v0.144.0). Every
+  configuration key the compose files set (`SIGNOZ_TELEMETRYSTORE_*`,
+  `SIGNOZ_SQLSTORE_*`) still resolves, and the image, entrypoint, ports, OpAMP
+  endpoint, `/api/v1/health` and the `/api/v1/register` call in
+  `scripts/bootstrap.sh` are unchanged.
+- **`signoz/signoz-otel-collector` `v0.144.9` → `v0.144.12`.** Adds sync traces
+  migrations 1015–1017: an `attributes_promoted` JSON column, a token-bloom
+  index on it, and 26 `gen_ai.*` columns per table (model, provider, token
+  counts, costs) with `DEFAULT` expressions and three indexes. All three are
+  metadata-only `ADD COLUMN` / `ADD INDEX`: existing parts are not rewritten,
+  and `migrate async up` has nothing new. From v0.144.10 the traces exporter
+  also writes every span's attributes to the JSON `attributes` column, and the
+  upstream PR for 1017 reports 10–15% more insert CPU and 15% more insert
+  memory. Watch ClickHouse and collector headroom after the upgrade. Image,
+  user (10001), CLI flags and `migrate` subcommands are unchanged, and `bash`
+  is still present for the health check.
+- **ClickHouse stays at `25.12.5`.** Foundry's first compatibility rule is
+  unchanged — collector `> 0.144.5` requires clickhouse `= 25.12.5` — and both
+  Foundry and SigNoz's own dev environment still pin `25.12.5`. The PR that
+  added the JSON `attributes` write (signoz-otel-collector#850) says it "needs
+  clickhouse > v25.12.5"; SigNoz's own pins read that as `>=`. CI's
+  end-to-end job ingests a trace against 25.12.5, which exercises that write.
+  Newer 25.12.x patch tags (25.12.11) and 26.x exist; both fall outside the
+  equality.
+- **`actions/checkout` `v4` → `v7`** in CI. v5 moved to the Node 24 runtime, v6
+  stores persisted credentials in a separate file, and v7 refuses to check out
+  fork PRs under `pull_request_target` / `workflow_run`. This workflow uses
+  none of those triggers, so none of it changes behaviour here.
+- **Unchanged on purpose:** `postgres` stays on `16-alpine`, which already
+  resolves to the newest 16.x (16.15). Going to 17 or 18 is a major-version
+  data-directory upgrade (`pg_upgrade` or dump/restore), and Foundry still uses
+  16. `nginx` stays on `1.30-alpine`, the current stable branch (1.30.5). The
+  histogram-quantile UDF stays at `v0.0.1`, its only release.
+
+### Collector config: two new traces processors
+
+SigNoz has shipped `signozspanmapper` (maps vendor-specific span attributes onto
+`gen_ai.*`) and `signozllmpricing` (per-span token cost) for a while, behind an
+`enable_ai_observability` flag that was off by default. v0.143.0 removed the
+flag, so every OpAMP push now includes both processor definitions: the mapper
+with three built-in groups (`gen_ai.llm`, `gen_ai.agent`, `gen_ai.tool`), the
+pricer with any rules set in the UI.
+
+The backend only writes `processors.<name>`. It never edits
+`service.pipelines`, so without entries in the base config the processors are
+configured and never run. Both `collector/config.yaml` files now define them
+the way Foundry's generated config does (`config.v01446`) and run them after
+`signozspanmetrics/delta` and before `batch`, mapper first because the pricer
+reads what the mapper writes. The base definitions are valid on their own (no
+mapper groups, no pricing rules), so the config still loads before the first
+OpAMP push.
+
+Even with no rules, the pricer strips any `signoz.gen_ai.*` attributes clients
+send: that prefix is reserved for costs the collector computes.
+
+`scripts/validate.sh` gains a check that both stacks' traces pipelines keep
+both processors, mapper before pricer, and still start with `memory_limiter`
+and end with `batch`.
+
+Foundry's matrix (`internal/compat/installation/compat.go`) gained a second
+row to match: signoz `>= 0.143.0` requires collector `>= 0.144.6`, advising
+0.144.11. A collector older than that rejects the push outright — unknown
+processor type — and, because the push is a single config, loses any log
+pipeline changes in it too. Upgrade both images together. The README,
+`docs/upgrading.md` and both `.env.example` files now document the rule.
+
+### Other
+
+- **The nginx comment and `docs/ha.md` said live tail needs WebSockets.** It
+  streams over server-sent events, and v0.141.0 removed the last WebSocket
+  route on the UI port. `proxy_buffering off` is what live tail actually
+  depends on, and it was already set. Only the comments changed.
+- **HA session caveat, now in `docs/ha.md`.** Opaque tokens are cached in each
+  backend's memory and checked there before Postgres, so a sign-out or
+  revocation through one backend does not reach the other until its cached
+  copy is evicted or expires. The JWT sessions before this could not be
+  revoked at all, so this is not a regression, but it is not full revocation
+  either.
+- **Removed API endpoints** in the range: v1 dashboards
+  (`/api/v1/dashboards*`, `/api/v2/metrics/dashboards`), billing
+  (`/api/v1/checkout`, `/billing`, `/portal`), query progress
+  (`/api/v3/query_progress`, `/ws/query_progress`) and
+  `/api/v3/licenses/active`. Nothing in this repo calls them; check your own
+  scripts if you drive the SigNoz API.
+
 ## 2026-08-31 — SigNoz v0.139.0
 
 Version bumps only; no topology, config or script changes.

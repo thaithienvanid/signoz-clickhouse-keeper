@@ -17,7 +17,7 @@ Files: [`deploy/ha/`](../deploy/ha/)
 ```mermaid
 graph TB
     subgraph edge["Edge — the only published ports"]
-        LB["nginx<br/>:4317 gRPC · :4318 HTTP · :8080 UI"]
+        LB["nginx<br/>:4317 gRPC<br/>:4318 HTTP<br/>:8080 UI"]
     end
 
     subgraph ingest["Ingestion — 2 replicas"]
@@ -32,12 +32,14 @@ graph TB
     end
 
     subgraph data["Storage — 1 shard, 3 replicas"]
+        direction LR
         D1[("clickhouse-1<br/>replica-01")]
         D2[("clickhouse-2<br/>replica-02")]
         D3[("clickhouse-3<br/>replica-03")]
     end
 
     subgraph coord["Coordination — Raft quorum 2 of 3"]
+        direction LR
         K1["keeper-1"]
         K2["keeper-2"]
         K3["keeper-3"]
@@ -48,24 +50,28 @@ graph TB
     C1 -.OpAMP.-> S1
     C2 -.OpAMP.-> S2
     S1 & S2 --> PG
-    C1 & C2 --> D1 & D2 & D3
-    S1 & S2 --> D1 & D2 & D3
-    D1 <-.-> D2 <-.-> D3
-    D1 & D2 & D3 -.coordination.-> K1
+    C1 & C2 -->|writes, any replica| data
+    S1 & S2 -->|queries| data
+    D1 <-.replication.-> D2 <-.replication.-> D3
+    data -.coordination.-> coord
     K1 <-.Raft.-> K2 <-.Raft.-> K3
 
-    style LB fill:#fff4e6,stroke:#e65100
-    style C1 fill:#e8f5e9,stroke:#2e7d32
-    style C2 fill:#e8f5e9,stroke:#2e7d32
-    style S1 fill:#fce4ec,stroke:#ad1457
-    style S2 fill:#fce4ec,stroke:#ad1457
-    style PG fill:#fce4ec,stroke:#ad1457
-    style D1 fill:#f3e5f5,stroke:#6a1b9a
-    style D2 fill:#f3e5f5,stroke:#6a1b9a
-    style D3 fill:#f3e5f5,stroke:#6a1b9a
-    style K1 fill:#fff9c4,stroke:#f9a825
-    style K2 fill:#fff9c4,stroke:#f9a825
-    style K3 fill:#fff9c4,stroke:#f9a825
+    classDef lb fill:#ea580c26,stroke:#ea580c,stroke-width:2px
+    classDef ingest fill:#16a34a26,stroke:#16a34a,stroke-width:2px
+    classDef query fill:#db277726,stroke:#db2777,stroke-width:2px
+    classDef storage fill:#8b5cf626,stroke:#8b5cf6,stroke-width:2px
+    classDef coord fill:#d9770626,stroke:#d97706,stroke-width:2px
+
+    class LB lb
+    class C1,C2 ingest
+    class S1,S2,PG query
+    class D1,D2,D3 storage
+    class K1,K2,K3 coord
+    style edge fill:#80808014,stroke:#808080
+    style ingest fill:#80808014,stroke:#808080
+    style api fill:#80808014,stroke:#808080
+    style data fill:#80808014,stroke:#808080
+    style coord fill:#80808014,stroke:#808080
 ```
 
 ### What tolerates what
@@ -83,6 +89,15 @@ graph TB
 
 Note the asymmetry that surprises people: losing Keeper quorum stops *writes*
 but not *reads*, while losing Postgres stops the *UI* but not *ingestion*.
+
+Sessions are opaque tokens stored in Postgres (the default from SigNoz
+v0.143.0), so they survive losing a backend. Each backend also caches tokens in
+memory and checks that cache before Postgres, so signing out or revoking a user
+through one backend does not reach the other until its cached copy is evicted
+or expires (`tokenizer.lifetime.max`, 720h by default). A shared Redis cache
+(`SIGNOZ_CACHE_PROVIDER=redis` plus `SIGNOZ_CACHE_REDIS_*`) closes that gap;
+this stack does not ship one. The JWT sessions that came before could not be
+revoked at all.
 
 ---
 
@@ -254,7 +269,8 @@ noting:
   for its lifetime.
 - `grpc_next_upstream error timeout non_idempotent` so a collector dying
   mid-stream retries against the other.
-- WebSocket upgrade headers on the UI route — SigNoz's live tail needs them.
+- `proxy_buffering off` on the UI route — live tail streams over server-sent
+  events, which a buffering proxy holds back.
 - `proxy_request_buffering off` — telemetry bodies are large and compressed;
   buffering them to disk adds latency for nothing.
 - Its own health endpoint on `:8081`, unpublished.

@@ -115,6 +115,35 @@ for f in deploy/standalone/clickhouse/config.d/signoz.xml deploy/ha/clickhouse/c
     fi
 done
 
+# SigNoz v0.143.0+ pushes LLM-observability config over OpAMP into the
+# signozspanmapper and signozllmpricing processors, and expects the base config
+# to already have them in the traces pipeline.
+head_ "collector traces pipeline"
+for stack in standalone ha; do
+    f="deploy/${stack}/collector/config.yaml"
+    if out=$(python3 - "$f" <<'PY' 2>&1
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+procs = d["service"]["pipelines"]["traces"]["processors"]
+for name in ("signozspanmapper", "signozllmpricing"):
+    if name not in d["processors"]:
+        sys.exit(f"processors.{name} is not defined")
+    if name not in procs:
+        sys.exit(f"{name} is missing from the traces pipeline")
+# The pricer reads the gen_ai.* attributes the mapper writes.
+if procs.index("signozspanmapper") > procs.index("signozllmpricing"):
+    sys.exit(f"signozspanmapper must run before signozllmpricing: {procs}")
+if procs[0] != "memory_limiter" or procs[-1] != "batch":
+    sys.exit(f"traces processors must start with memory_limiter and end with batch: {procs}")
+PY
+    ); then
+        pass "$f"
+    else
+        fail "$f"
+        echo "$out" | sed 's/^/        /'
+    fi
+done
+
 # ── Security fragments ───────────────────────────────────────────────────────
 head_ "security fragments"
 for stack in standalone ha; do

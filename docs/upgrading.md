@@ -16,11 +16,24 @@ SigNoz's deployment tool carries an explicit compatibility rule
     Target:   MoldingKindTelemetryStore,
     Requires: "=25.12.5",
     Advice:   "pin ingester to 0.144.5, or upgrade telemetrystore clickhouse to 25.12.5",
-}
+},
+{
+    Subject:  MoldingKindSignoz,
+    When:     ">=0.143.0",
+    Target:   MoldingKindIngester,
+    Requires: ">=0.144.6",
+    Advice:   "upgrade ingester to 0.144.11, or pin signoz to 0.142.x",
+},
 ```
 
 Collector versions above 0.144.5 require ClickHouse **exactly** 25.12.5. Not a
 floor — an equality.
+
+SigNoz 0.143.0 and later require collector 0.144.6 or later. That one is a
+floor, and it comes with a config change: the collector's traces pipeline must
+carry the `signozspanmapper` and `signozllmpricing` processors, which SigNoz
+configures over OpAMP. `scripts/validate.sh` checks both collector configs for
+them.
 
 Docker Hub will happily offer you `clickhouse/clickhouse-server:latest`, which
 is a 26.x release. Using it means running a combination SigNoz does not test.
@@ -36,7 +49,7 @@ cat /tmp/foundry/internal/compat/installation/compat.go
 
 `scripts/validate.sh` verifies every pinned tag still exists on Docker Hub, and
 CI runs weekly to catch tags disappearing. It cannot tell you the compatibility
-rule has changed — check that by hand before an upgrade.
+rules have changed — check them by hand before an upgrade.
 
 ## Everything else tracks latest stable
 

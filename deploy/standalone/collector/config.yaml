@@ -62,6 +62,38 @@ processors:
       - name: signoz.collector.id
       - name: service.version
 
+  # LLM observability (SigNoz >= v0.143.0, collector >= v0.144.6). Once an
+  # organization exists, SigNoz rewrites both definitions over OpAMP: the
+  # mapper gets its built-in gen_ai.llm / gen_ai.agent / gen_ai.tool groups,
+  # the pricer whatever rules are set in the UI. It never touches
+  # service.pipelines, so wiring them into the traces pipeline is this file's
+  # job; left out of it, they are configured and never run.
+  #
+  # Copies vendor-specific span attributes onto the gen_ai.* keys the pricer
+  # and the UI read, so it must run before the pricer.
+  signozspanmapper:
+    groups: []
+
+  # Writes per-span token cost to the output_attrs keys, from the gen_ai.*
+  # token counts on the input side. With no rules it prices nothing, but it
+  # always drops client-sent signoz.gen_ai.* attributes: that prefix is
+  # reserved for costs the collector computes.
+  signozllmpricing:
+    attrs:
+      model: gen_ai.request.model
+      in: gen_ai.usage.input_tokens
+      out: gen_ai.usage.output_tokens
+      cache_read: gen_ai.usage.cache_read.input_tokens
+      cache_write: gen_ai.usage.cache_creation.input_tokens
+    default_pricing:
+      rules: []
+    output_attrs:
+      in: signoz.gen_ai.usage.input_tokens.cost
+      out: signoz.gen_ai.usage.output_tokens.cost
+      cache_read: signoz.gen_ai.usage.cache_read.input_tokens.cost
+      cache_write: signoz.gen_ai.usage.cache_write.input_tokens.cost
+      total: signoz.gen_ai.usage.tokens.cost
+
 connectors:
   # Feeds SigNoz's own usage/metering views.
   signozmeter:
@@ -125,7 +157,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, signozspanmetrics/delta, batch]
+      processors: [memory_limiter, signozspanmetrics/delta, signozspanmapper, signozllmpricing, batch]
       exporters: [clickhousetraces, signozmeter, metadataexporter]
 
     metrics:
