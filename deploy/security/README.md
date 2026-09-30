@@ -154,7 +154,7 @@ Two files deliberately stay yours and never get chowned:
 Verify the uid against the image rather than trusting this number:
 
 ```bash
-docker inspect signoz/signoz-otel-collector:v0.144.9 --format '{{.Config.User}}'
+docker inspect signoz/signoz-otel-collector:v0.144.12 --format '{{.Config.User}}'
 ```
 
 The same applies to the `persistent-queue` fragment, but the compose overlay

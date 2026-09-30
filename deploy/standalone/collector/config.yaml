@@ -62,6 +62,31 @@ processors:
       - name: signoz.collector.id
       - name: service.version
 
+  # LLM observability (SigNoz >= v0.143.0, collector >= v0.144.6). The backend
+  # fills both processors in over OpAMP but only for pipeline entries that
+  # already exist here, so they ship empty: the mapper with no groups, the
+  # pricer with no rules. Neither alters a span until SigNoz sends it config.
+  signozspanmapper:
+    groups: []
+
+  # Writes per-span token cost to the output_attrs keys, from the gen_ai.*
+  # token counts on the input side.
+  signozllmpricing:
+    attrs:
+      model: gen_ai.request.model
+      in: gen_ai.usage.input_tokens
+      out: gen_ai.usage.output_tokens
+      cache_read: gen_ai.usage.cache_read.input_tokens
+      cache_write: gen_ai.usage.cache_creation.input_tokens
+    default_pricing:
+      rules: []
+    output_attrs:
+      in: signoz.gen_ai.usage.input_tokens.cost
+      out: signoz.gen_ai.usage.output_tokens.cost
+      cache_read: signoz.gen_ai.usage.cache_read.input_tokens.cost
+      cache_write: signoz.gen_ai.usage.cache_write.input_tokens.cost
+      total: signoz.gen_ai.usage.tokens.cost
+
 connectors:
   # Feeds SigNoz's own usage/metering views.
   signozmeter:
@@ -125,7 +150,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, signozspanmetrics/delta, batch]
+      processors: [memory_limiter, signozspanmetrics/delta, signozspanmapper, signozllmpricing, batch]
       exporters: [clickhousetraces, signozmeter, metadataexporter]
 
     metrics:

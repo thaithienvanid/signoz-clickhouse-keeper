@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-09-30 — SigNoz v0.144.0
+
+Version bumps plus one required collector config change.
+
+- **`signoz/signoz` `v0.139.0` → `v0.144.0`.** Seven releases (v0.140.0,
+  v0.141.0, v0.141.1, v0.142.0, v0.142.1, v0.143.0, v0.144.0).
+- **`signoz/signoz-otel-collector` `v0.144.9` → `v0.144.12`.** v0.144.12 is the
+  newest tag, and SigNoz now sets a floor for it (below).
+- **New traces-pipeline processors: `signozspanmapper` and `signozllmpricing`.**
+  From v0.143.0, SigNoz configures these over OpAMP for LLM observability (span
+  attribute mapping and per-span token cost). It expects the base collector
+  config to already have them in the traces pipeline. Both
+  `collector/config.yaml` files now define them the way Foundry's generated
+  config does (`config.v01446`): the mapper with no groups and the pricer with
+  no rules, placed after `signozspanmetrics/delta` and before `batch`. A new
+  check in `scripts/validate.sh` fails if either stack's traces pipeline loses
+  them, or stops starting with `memory_limiter` and ending with `batch`.
+- **New compatibility rule.** Foundry's matrix
+  (`internal/compat/installation/compat.go`) now has a second row: signoz
+  `>= 0.143.0` requires collector `>= 0.144.6`, with 0.144.11 as the advised
+  version. v0.144.12 satisfies it. Upgrade the collector together with SigNoz,
+  never after it. The README, `docs/upgrading.md` and both `.env.example` files
+  document the rule.
+- **ClickHouse stays at `25.12.5`.** The first rule is unchanged — collector
+  `> 0.144.5` still requires clickhouse `= 25.12.5` — and Foundry still pins
+  `25.12.5` for both server and Keeper. Newer 25.12.x patch tags (25.12.11) and
+  26.x exist; both are outside that equality.
+- **`actions/checkout` `v4` → `v7`** in CI. v5 moved to the Node 24 runtime, v6
+  stores persisted credentials in a separate file, and v7 refuses to check out
+  fork PRs under `pull_request_target` / `workflow_run`. This workflow uses
+  none of those triggers, so none of them changes its behaviour.
+- **Unchanged on purpose:** `postgres` stays on `16-alpine`, which already
+  resolves to the newest 16.x (16.15). Going to 17 or 18 is a major-version
+  data-directory upgrade (`pg_upgrade` or dump/restore), and Foundry still uses
+  16. `nginx` stays on `1.30-alpine`, the current stable branch (1.30.5). The
+  histogram-quantile UDF stays at `v0.0.1`, its only release.
+
 ## 2026-08-31 — SigNoz v0.139.0
 
 Version bumps only; no topology, config or script changes.
