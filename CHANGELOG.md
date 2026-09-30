@@ -88,7 +88,8 @@ Even with no rules, the pricer strips any `signoz.gen_ai.*` attributes clients
 send: that prefix is reserved for costs the collector computes.
 
 `scripts/validate.sh` gains a check that both stacks' traces pipelines keep
-both processors and still start with `memory_limiter` and end with `batch`.
+both processors, mapper before pricer, and still start with `memory_limiter`
+and end with `batch`.
 
 Foundry's matrix (`internal/compat/installation/compat.go`) gained a second
 row to match: signoz `>= 0.143.0` requires collector `>= 0.144.6`, advising

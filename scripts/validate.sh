@@ -130,6 +130,9 @@ for name in ("signozspanmapper", "signozllmpricing"):
         sys.exit(f"processors.{name} is not defined")
     if name not in procs:
         sys.exit(f"{name} is missing from the traces pipeline")
+# The pricer reads the gen_ai.* attributes the mapper writes.
+if procs.index("signozspanmapper") > procs.index("signozllmpricing"):
+    sys.exit(f"signozspanmapper must run before signozllmpricing: {procs}")
 if procs[0] != "memory_limiter" or procs[-1] != "batch":
     sys.exit(f"traces processors must start with memory_limiter and end with batch: {procs}")
 PY
