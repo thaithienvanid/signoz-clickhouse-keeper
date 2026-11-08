@@ -35,9 +35,22 @@ jobs:
       - name: Install foundryctl
         env:
           FOUNDRY_VERSION: v0.3.0
+          # sha256 of foundry_linux_amd64.tar.gz, from the release's
+          # foundry_0.3.0_checksums.txt. Pinned here rather than read from
+          # that file at run time: the file comes from the same release, so
+          # it would catch corruption but not a release that changes under the
+          # same tag. Bump it together with FOUNDRY_VERSION.
+          FOUNDRY_SHA256: 7555f91ee87a9d0d517009fc859ef64be76ad8b045446b2fe4360b896dc5838d
+        # GitHub's release download host returns transient 502/503s, which
+        # once failed this whole job. Retry them, and download to a file
+        # rather than piping into tar: curl writes a retried transfer after
+        # the partial one, and tar would see the corrupt concatenation.
         run: |
-          curl -fsSL "https://github.com/SigNoz/foundry/releases/download/${FOUNDRY_VERSION}/foundry_linux_amd64.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+            -o "$RUNNER_TEMP/foundry.tar.gz" \
+            "https://github.com/SigNoz/foundry/releases/download/${FOUNDRY_VERSION}/foundry_linux_amd64.tar.gz"
+          echo "${FOUNDRY_SHA256}  $RUNNER_TEMP/foundry.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/foundry.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/foundry_linux_amd64/bin" >> "$GITHUB_PATH"
 
       - name: Static validation
