@@ -26,8 +26,8 @@ OTLP_AUTH_HEADER="${OTLP_AUTH_HEADER:-}"
 read -r -a CURL_EXTRA <<< "${CURL_OPTS:-}"
 
 case "$STACK" in
-    standalone) COMPOSE="deploy/standalone/docker-compose.yaml"; CH_CONTAINER="signoz-clickhouse" ;;
-    ha)         COMPOSE="deploy/ha/docker-compose.yaml";         CH_CONTAINER="signoz-clickhouse-1" ;;
+    standalone) COMPOSE="deploy/standalone/docker-compose.yaml"; CH_CONTAINER="signoz-clickhouse";   COLLECTORS="otel-collector" ;;
+    ha)         COMPOSE="deploy/ha/docker-compose.yaml";         CH_CONTAINER="signoz-clickhouse-1"; COLLECTORS="otel-collector-1 otel-collector-2" ;;
     *) echo "error: unknown stack '${STACK}' (expected standalone or ha)" >&2; exit 1 ;;
 esac
 
@@ -59,24 +59,23 @@ post_otlp() {
     curl "${args[@]}"
 }
 
-# Runs a query and leaves the server's error message in CH_ERR rather than
-# discarding it. Swallowing stderr here turns "column does not exist" into an
-# empty result, which is indistinguishable from "no rows yet" — a poll loop
-# then spins to its timeout and reports the wrong cause.
-CH_ERR=""
+# Runs a query and keeps the server's error message rather than discarding it.
+# Swallowing stderr here turns "column does not exist" into an empty result,
+# which is indistinguishable from "no rows yet" — a poll loop then spins to its
+# timeout and reports the wrong cause.
+#
+# The message goes to a file, read back with ch_err. A variable would not
+# survive: callers run this inside $( ), a subshell, so anything it assigns
+# is gone by the time they look.
+CH_ERR_FILE="$(mktemp)"
+trap 'rm -f "$CH_ERR_FILE"' EXIT
 ch_query() {
-    local out rc err_file
-    err_file="$(mktemp)"
-    out="$(docker exec "$CH_CONTAINER" clickhouse-client \
+    docker exec "$CH_CONTAINER" clickhouse-client \
         --user "${CLICKHOUSE_USER:-signoz}" \
         --password "${CLICKHOUSE_PASSWORD:-}" \
-        "${@:2}" --query "$1" 2>"$err_file")"
-    rc=$?
-    CH_ERR="$(tr '\n' ' ' < "$err_file" | cut -c1-400)"
-    rm -f "$err_file"
-    printf '%s' "$out"
-    return $rc
+        "${@:2}" --query "$1" 2>"$CH_ERR_FILE"
 }
+ch_err() { tr '\n' ' ' < "$CH_ERR_FILE" | cut -c1-400; }
 
 # ── Containers ───────────────────────────────────────────────────────────────
 head_ "containers"
@@ -192,13 +191,14 @@ if [ "$found_traces" = true ]; then
 else
     fail "no trace for service '${RUN_ID}' after 60s"
     # Say why. A query error and an empty table look identical otherwise.
-    if [ -n "$CH_ERR" ]; then
-        echo "        clickhouse error: ${CH_ERR}"
+    err="$(ch_err)"
+    if [ -n "$err" ]; then
+        echo "        clickhouse error: ${err}"
     fi
     total=$(ch_query "SELECT count() FROM signoz_traces.distributed_signoz_index_v3") || true
     echo "        rows in distributed_signoz_index_v3: ${total:-<query failed>}"
-    [ -n "$CH_ERR" ] && echo "        (${CH_ERR})"
-    echo "        collector logs: docker compose -f ${COMPOSE} logs otel-collector"
+    err="$(ch_err)"; [ -n "$err" ] && echo "        (${err})"
+    echo "        collector logs: docker compose -f ${COMPOSE} logs ${COLLECTORS}"
 fi
 
 # ── Replication (HA only) ────────────────────────────────────────────────────
