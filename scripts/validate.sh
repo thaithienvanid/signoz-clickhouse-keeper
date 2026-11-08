@@ -115,26 +115,41 @@ for f in deploy/standalone/clickhouse/config.d/signoz.xml deploy/ha/clickhouse/c
     fi
 done
 
-# SigNoz v0.143.0+ pushes LLM-observability config over OpAMP into the
-# signozspanmapper and signozllmpricing processors, and expects the base config
-# to already have them in the traces pipeline.
-head_ "collector traces pipeline"
+# The collector pipelines SigNoz depends on. v0.143.0+ pushes LLM-observability
+# config over OpAMP into signozspanmapper and signozllmpricing but never edits
+# service.pipelines, so the base config must already run them. The logs
+# normalizer goes right after memory_limiter because SigNoz inserts the
+# UI-built log pipelines just before it.
+head_ "collector pipelines"
 for stack in standalone ha; do
     f="deploy/${stack}/collector/config.yaml"
     if out=$(python3 - "$f" <<'PY' 2>&1
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
-procs = d["service"]["pipelines"]["traces"]["processors"]
-for name in ("signozspanmapper", "signozllmpricing"):
-    if name not in d["processors"]:
-        sys.exit(f"processors.{name} is not defined")
-    if name not in procs:
-        sys.exit(f"{name} is missing from the traces pipeline")
+pipes = d["service"]["pipelines"]
+want = {
+    "traces":  ["signozspanmapper", "signozllmpricing"],
+    "metrics": [],
+    "logs":    ["signozlogsnormalizer"],
+}
+for pipe, required in want.items():
+    procs = pipes[pipe]["processors"]
+    for name in required + ["filter/drop_stale"]:
+        if name not in d["processors"]:
+            sys.exit(f"processors.{name} is not defined")
+        if name not in procs:
+            sys.exit(f"{name} is missing from the {pipe} pipeline")
+    # memory_limiter can only shed load it sees before anything has buffered it.
+    if procs[0] != "memory_limiter" or procs[-1] != "batch":
+        sys.exit(f"{pipe} processors must start with memory_limiter and end with batch: {procs}")
+    if procs[-2] != "filter/drop_stale":
+        sys.exit(f"filter/drop_stale must run just before batch in {pipe}: {procs}")
+traces = pipes["traces"]["processors"]
 # The pricer reads the gen_ai.* attributes the mapper writes.
-if procs.index("signozspanmapper") > procs.index("signozllmpricing"):
-    sys.exit(f"signozspanmapper must run before signozllmpricing: {procs}")
-if procs[0] != "memory_limiter" or procs[-1] != "batch":
-    sys.exit(f"traces processors must start with memory_limiter and end with batch: {procs}")
+if traces.index("signozspanmapper") > traces.index("signozllmpricing"):
+    sys.exit(f"signozspanmapper must run before signozllmpricing: {traces}")
+if pipes["logs"]["processors"][1] != "signozlogsnormalizer":
+    sys.exit(f"signozlogsnormalizer must come right after memory_limiter: {pipes['logs']['processors']}")
 PY
     ); then
         pass "$f"

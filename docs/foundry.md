@@ -24,7 +24,7 @@ to generate a pairing that breaks its compatibility rules (see
 way this repo has had to for the collector pipeline and the ClickHouse pin.
 
 **Stay here** if you rely on what Foundry's compose output does not do. Every
-row below is from `foundryctl` v0.3.0 output, forged from
+row below is from `foundryctl` v0.5.0 output, forged from
 [`deploy/foundry/casting.yaml`](../deploy/foundry/casting.yaml):
 
 | This repo | Foundry compose output |
@@ -80,7 +80,7 @@ untouched, and they are the rollback.
   ClickHouse data. The old volumes are kept until you delete them.
 - **foundryctl**, pinned to the version this runbook was checked against:
   ```bash
-  curl -fsSL https://signoz.io/foundry.sh | FOUNDRY_VERSION=v0.3.0 bash
+  curl -fsSL https://signoz.io/foundry.sh | FOUNDRY_VERSION=v0.5.0 bash
   foundryctl version
   ```
 
@@ -278,7 +278,7 @@ That is the point of no return.
 
 ## HA
 
-Not covered, and deliberately so. From `foundryctl` v0.3.0, a compose casting
+Not covered, and deliberately so. From `foundryctl` v0.5.0, a compose casting
 with replicas generates the replica containers but no load balancer:
 
 - scaled ingesters lose their host ports (Foundry's docs say so);

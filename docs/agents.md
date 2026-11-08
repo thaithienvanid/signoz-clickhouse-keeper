@@ -207,6 +207,94 @@ Call the returned shutdown on exit, or the last batch never leaves the process.
 
 ---
 
+## LLM and agent applications
+
+SigNoz's LLM views cover model usage, token counts, cost, and prompts and
+completions in the trace waterfall. Nothing extra needs deploying for them:
+both collector configs here already run the processors they depend on, and
+`make smoke` checks that path end to end. What decides whether the views fill
+in is how the application is instrumented.
+
+**They read spans, and only spans.** As of SigNoz v0.149.0 every LLM view is
+built from `gen_ai.*` span attributes. GenAI metrics (`gen_ai.client.*`) and
+GenAI log events are stored like any other telemetry, but no LLM view reads
+them.
+
+**Your instrumentation does not have to emit `gen_ai.*` itself.** Anything that
+follows the OpenTelemetry GenAI conventions, OpenTelemetry's own GenAI
+instrumentations included, already does and needs nothing more. For the rest,
+SigNoz's span mapper runs in the collector and rewrites vendor keys onto
+`gen_ai.*`. Its built-in groups cover OpenInference (Arize Phoenix and others),
+OpenLLMetry / Traceloop, the Vercel AI SDK and Mastra, Langfuse, LiteLLM,
+CrewAI, LangSmith, OpenRouter, Pydantic AI, Google ADK, vLLM and Claude Code.
+An instrumentation that uses neither shows up in the LLM views only once you
+add a mapping group for it in SigNoz.
+
+**Prompts and completions appear only if the instrumentation puts them on the
+span.** This is the setting most often got wrong:
+
+- **OpenTelemetry's own GenAI instrumentations** (for example
+  `opentelemetry-instrumentation-openai-v2`) capture no content by default. The
+  older `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` writes it as
+  *log events*, which the LLM views never read. To put it on spans, opt in to
+  the current conventions and choose `span_only`:
+
+  ```bash
+  pip install opentelemetry-distro opentelemetry-exporter-otlp \
+              opentelemetry-instrumentation-openai-v2
+  export OTEL_SERVICE_NAME=chat-api
+  export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.example.com:4318
+  export OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental
+  export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only
+  opentelemetry-instrument python app.py
+  ```
+
+- **OpenLLMetry / Traceloop** records content on spans by default. Set
+  `TRACELOOP_TRACE_CONTENT=false` to keep it out.
+
+Captured content is prompt and response text, with whatever personal data or
+secrets your users and tools put in it. It is stored in ClickHouse and
+readable by anyone who can open the trace, so decide deliberately.
+
+**Cost needs pricing rules.** A self-hosted SigNoz ships no price list, so
+spans show token counts but no cost until you add LLM pricing rules in
+SigNoz. The rules reach the collector over OpAMP, and only spans ingested
+after that are priced: cost is computed at ingest, never backfilled.
+
+What gets priced, per span, from these attributes:
+
+| Tokens | Attribute | Priced at |
+|---|---|---|
+| Input | `gen_ai.usage.input_tokens` | the rule's input price, for the input tokens that were not cached |
+| Output | `gen_ai.usage.output_tokens` | the rule's output price |
+| Cache read | `gen_ai.usage.cache_read.input_tokens` | the rule's cache-read price |
+| Cache write | `gen_ai.usage.cache_creation.input_tokens` | the rule's cache-write price |
+
+- **Cache tokens are part of the input count**, as OTel GenAI and
+  OpenInference report them. If the two cache counts add up to more than the
+  input count, the collector assumes the provider reports them separately and
+  bills all four counts as they are.
+- **Reasoning tokens** (`gen_ai.usage.reasoning.output_tokens`) are shown but
+  have no price of their own. Providers count them inside output tokens, so
+  they are priced there.
+- **Token counts must be numbers.** A count sent as a string is stored, but it
+  is priced as zero.
+
+**Large prompts and the size limits.** One export request carries a whole batch
+of spans, so prompt-heavy traffic reaches the limits sooner than you expect:
+
+| Path | Limit | Where it is set |
+|---|---|---|
+| OTLP/gRPC | 16 MiB per message | `max_recv_msg_size_mib` in `collector/config.yaml` |
+| OTLP/HTTP | 20 MiB per request | collector default |
+| HA, through nginx | 32 MiB per request | `client_max_body_size` in `nginx.conf` |
+
+If exports start failing with `413` or `RESOURCE_EXHAUSTED`, lower the SDK's
+batch size (`OTEL_BSP_MAX_EXPORT_BATCH_SIZE`, default 512) before raising the
+limits.
+
+---
+
 ## Containers and Kubernetes
 
 Compose:

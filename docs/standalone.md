@@ -169,6 +169,22 @@ produces a UI that looks broken in a specific way:
 | `metadataexporter` | `signoz_metadata` | Query-builder attribute autocomplete is empty |
 | `signozclickhousemeter` | `signoz_meter` | Usage/metering views are empty |
 
+The processors, in pipeline order. The pipelines are `traces`, `metrics` and
+`logs`; `scripts/validate.sh` enforces this order in both stacks.
+
+| Processor | Pipelines | What it is for |
+|---|---|---|
+| `memory_limiter` | all | Sheds load before the container hits its memory limit. Must stay first: it can only shed what nothing has buffered yet |
+| `signozspanmetrics/delta` | traces | RED metrics (rate, errors, duration) from spans |
+| `signozspanmapper` | traces | Rewrites vendor LLM attributes onto `gen_ai.*`; SigNoz pushes its rules over OpAMP |
+| `signozllmpricing` | traces | Per-span LLM cost from SigNoz's pricing rules, pushed over OpAMP. Runs after the mapper, whose output it reads |
+| `signozlogsnormalizer` | logs | Structured copy of each log body for SigNoz's JSON log body. UI-built log pipelines run just before it |
+| `filter/drop_stale` | all | Drops data timestamped more than 15 days ago |
+| `batch` | all | Batches writes to ClickHouse. Last, so it batches only what survived the rest |
+
+See [agents.md](agents.md#llm-and-agent-applications) for what LLM telemetry
+needs from the application side.
+
 `sending_queue` is disabled on the ClickHouse exporters, matching upstream: they
 batch and retry internally, and an in-memory queue on top mostly adds data to
 lose on restart. For durability across restarts, apply the `persistent-queue`

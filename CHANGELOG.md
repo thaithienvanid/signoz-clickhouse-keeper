@@ -1,5 +1,178 @@
 # Changelog
 
+## 2026-11-08 — SigNoz v0.149.0; GenAI observability checked end to end
+
+### Before you upgrade
+
+- **Upgrade for security.** In v0.144.0, any logged-in user can reach an SQL
+  injection through `POST /api/v1/rules/{id}/history/{stats,timeline,
+  top_contributors,overall_status}`. v0.147.0 removed those endpoints in favour
+  of parameterised `/api/v2/rules/{id}/history/*` equivalents.
+- **Take a backup: metastore migrations 131–143 run on startup, and none can be
+  reversed.** Most add permission tuples. The ones that rewrite or delete data:
+  - 131 adds a stored `spec` to notification channels and permanently renames
+    the `msteamsv2` channel type to `msteams`;
+  - 135 deletes SigNoz-synced LLM pricing rules that fail new checks (your own
+    rules are kept);
+  - 137, 140 and 142 rewrite the built-in roles' transaction groups;
+  - 139 deletes role rows of deleted service accounts;
+  - 141 rewrites traces saved views to the new field names.
+  As always, `make backup` is the rollback.
+- **Upgrade SigNoz and the collector together.** Collector v0.144.13 adds
+  metadata migration 1002, a row that tells SigNoz to read trace attributes from
+  the JSON `attributes` column. v0.145.0 and later read it only behind a
+  feature flag, off by default. v0.144.0 has no flag and switches straight
+  away. In this repo the migrator runs before the new backend starts, so the
+  old backend sees the row only while compose recreates it. Results are the
+  same either way, because the collector has written that column since
+  v0.144.10.
+- **Nobody is logged out this time.** The tokenizer and session code did not
+  change.
+
+### Versions
+
+- **`signoz/signoz` `v0.144.0` → `v0.149.0`.** Six releases (v0.145.0,
+  v0.146.0, v0.147.0, v0.148.0, v0.148.1, v0.149.0). Every configuration key
+  the compose files set still resolves, and the image, entrypoint, ports, OpAMP
+  endpoint, `/api/v1/health` and `/api/v1/register` are unchanged. v0.148.0
+  sets a ClickHouse setting that needs 25.6 or later, which 25.12.5 meets.
+- **`signoz/signoz-otel-collector` `v0.144.12` → `v0.144.15`.**
+  - Two sync migrations, both metadata-only:
+    - traces 1018 adds four bloom-filter indexes on JSON attribute paths:
+      `http.route`, `rpc.method`, `gen_ai.request.model` and
+      `gen_ai.provider.name`. Existing parts get them as they merge.
+    - metadata 1002 adds the row described above.
+  - `migrate async up` has nothing new, and no new database appears, so
+    `scripts/backup.sh` still covers everything.
+  - The image, user, CLI flags and `migrate` subcommands are unchanged.
+  - The LLM cost formula changed in v0.144.13 in how it bills cached tokens, so
+    a given rule can price a span differently from before.
+  - grpc 1.83.2 rejects gRPC requests that carry neither `:authority` nor
+    `Host`. Conformant clients and nginx's `grpc_pass` send `:authority`.
+- **`foundryctl` `v0.3.0` → `v0.5.0`**, in CI and in `docs/foundry.md`. The
+  casting forges the same compose file, container names, volumes and patch
+  targets as before. Every claim in the runbook's comparison table and its HA
+  section was re-checked against v0.5.0 output.
+- **Unchanged on purpose:**
+  - **ClickHouse and Keeper `25.12.5`.** Foundry's compatibility rule
+    (collector `> 0.144.5` requires clickhouse `= 25.12.5`) is unchanged.
+  - **`postgres` `16-alpine`**, now 16.15. A major-version jump needs a
+    data-directory upgrade, and Foundry still ships 16.
+  - **`nginx` `1.30-alpine`**, now 1.30.6. 1.30 is still the stable branch.
+  - **`actions/checkout@v7`**, now 7.0.1.
+  - **The histogram-quantile UDF `v0.0.1`.** It is still the only release.
+
+### Collector config
+
+Both stacks now match the config Foundry generates for collector v0.144.15,
+except that `memory_limiter` stays first in every pipeline:
+
+```
+traces:  memory_limiter, signozspanmetrics/delta, signozspanmapper, signozllmpricing, filter/drop_stale, batch
+metrics: memory_limiter, filter/drop_stale, batch
+logs:    memory_limiter, signozlogsnormalizer, filter/drop_stale, batch
+```
+
+- **`signozlogsnormalizer`** (new in collector v0.144.13; this config needs
+  v0.144.15) rewrites each log body into a map for SigNoz's upcoming JSON log
+  body, and keeps the original for the regular `body` column.
+  - **Ordering.** SigNoz v0.146.0+ inserts the log pipelines you build in the
+    UI just before it, so they still see raw bodies. That is also why it goes
+    after `memory_limiter`: placed first, as Foundry does, it would pull the UI
+    pipelines ahead of the memory limiter.
+  - **Cost.** The structured copy takes extra storage, and SigNoz only queries
+    it behind its experimental JSON-body flag. The config comment says how to
+    turn it off.
+- **`filter/drop_stale`** drops logs, datapoints and spans timestamped more than
+  15 days ago, just before `batch`.
+  - Logs and spans: the exporters already apply this limit.
+  - Metrics: this is new. Backfilling older metrics is now dropped; raise the
+    window if you do that on purpose.
+  - Why now: SigNoz is moving the age check out of the exporters and into
+    this processor (merged upstream, not yet released). Without the filter,
+    that change would start storing arbitrarily old data.
+- **`scripts/validate.sh`'s pipeline check** now covers all three pipelines. It
+  checks that `memory_limiter` is first, `batch` is last, `filter/drop_stale` is
+  just before `batch`, and the normalizer is right after `memory_limiter`. It
+  still checks that the mapper runs before the pricer. It was tested against
+  three deliberate misorderings, and fails each.
+- **This config now needs collector v0.144.15 or later.** Before v0.144.13 the
+  normalizer does not exist and the collector will not start. v0.144.13 and
+  v0.144.14 accept it, but lack v0.144.15's JSON sanitizing.
+  `docs/upgrading.md` and both `.env.example` files say so.
+- **`docs/standalone.md` documents the processors.** It already had a table of
+  the exporters; it now has one for the processors too, in pipeline order,
+  with what each is for.
+
+### GenAI / LLM observability
+
+The ingestion side already had what SigNoz's LLM views need. What was missing
+was proof that it works, and guidance for the application side, which is where
+it usually goes wrong.
+
+- **What SigNoz needs (as of v0.149.0)**:
+  - It builds its LLM views from `gen_ai.*` **span attributes** only. GenAI
+    metrics and log events are stored but not read.
+  - It bridges vendor instrumentations with span-mapper groups, which it seeds
+    when the organization is created and pushes to `signozspanmapper` over
+    OpAMP.
+  - It computes cost in `signozllmpricing`, from pricing rules.
+  - Both processors were already in both stacks' traces pipelines.
+- **New: `scripts/smoke-test.sh` checks the GenAI path end to end.**
+  - **What it sends:** an LLM span in OpenInference's keys (`llm.model_name`,
+    `llm.provider`, `llm.token_count.*`).
+  - **Mapper check:** it asserts the span is stored with `gen_ai.request.model`
+    and `gen_ai.provider.name`, and with every token count the views and the
+    pricer read: input, output, cache-read, cache-write and reasoning. Each is
+    its own pass/fail line, and a missing field is reported as `<absent>`.
+    That proves the mapper groups were seeded, pushed and applied.
+  - **Pricer check:** the span also carries a fake
+    `signoz.gen_ai.usage.tokens.cost`. The pricer always strips that prefix, so
+    its absence proves the pricer is in the pipeline without needing any
+    pricing rule.
+  - **Retries:** the span is re-sent each round, because the push carrying
+    the groups can trail the one that took the collector out of no-op mode.
+  - **On failure** it says whether the spans arrived unmapped or not at all.
+    It also prints the LLM attributes of the newest stored span, and the mapper
+    and pricer lines of the collector's effective config.
+- **New: an "LLM and agent applications" section in `docs/agents.md`.** It
+  covers the instrumentations the mapper handles and the content-capture
+  setting most often got wrong:
+  - **OpenTelemetry's GenAI instrumentations.** The legacy
+    `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` writes prompts
+    as log events, which the LLM views never read. Prompts reach spans only
+    with `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` plus
+    `span_only` (checked against `opentelemetry-util-genai` and
+    `opentelemetry-instrumentation-openai-v2`).
+  - **OpenLLMetry** captures content by default.
+  - **Cost:** a self-hosted SigNoz ships no price list, so costs stay empty
+    until pricing rules are added. The section also covers what is priced:
+    input, output, cache-read and cache-write tokens, with cache counts
+    treated as part of input. Reasoning tokens are priced as output, and token
+    counts sent as strings are priced as zero.
+  - **Limits:** the OTLP size limits for prompt-heavy traffic.
+- **Collector config comment:** the pricer's comment now says that costs need
+  pricing rules.
+
+### CI
+
+- **The smoke test never showed a ClickHouse error.** Its query helper stored
+  the server's message in a variable, but every caller runs it inside `$( )`,
+  a subshell, so the variable was gone before anyone read it. Every
+  "clickhouse error:" line the script has ever printed was empty, which turns
+  a failing query into an unexplained "no rows". The helper now writes the
+  message to a file, read back with `ch_err`. Tested with a stand-in `docker`
+  that exits with a ClickHouse error: the old helper reported nothing, the new
+  one reports the message.
+- **The `foundryctl` download now retries, and is verified.** A transient 503
+  from GitHub's release host failed run 38's `validate` job. The step made a
+  single request, and piped the download into `tar`, which a retry would have
+  corrupted. It now retries up to five times into a file, then checks it
+  against a sha256 pinned in the workflow before extracting. The digest was
+  cross-checked against the release's `checksums.txt`. It is pinned rather than
+  read from that file, because a checksum file from the same release cannot
+  catch a release that changes under its tag.
+
 ## 2026-09-30 — Foundry migration runbook; backups now include alert history
 
 - **`scripts/backup.sh` never backed up `signoz_analytics`.** That database

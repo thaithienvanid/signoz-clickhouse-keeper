@@ -85,7 +85,8 @@ processors:
   # Writes per-span token cost to the output_attrs keys, from the gen_ai.*
   # token counts on the input side. With no rules it prices nothing, but it
   # always drops client-sent signoz.gen_ai.* attributes: that prefix is
-  # reserved for costs the collector computes.
+  # reserved for costs the collector computes. A self-hosted install ships no
+  # price list, so costs stay empty until pricing rules are added in SigNoz.
   signozllmpricing:
     attrs:
       model: gen_ai.request.model
@@ -101,6 +102,32 @@ processors:
       cache_read: signoz.gen_ai.usage.cache_read.input_tokens.cost
       cache_write: signoz.gen_ai.usage.cache_write.input_tokens.cost
       total: signoz.gen_ai.usage.tokens.cost
+
+  # Collector >= v0.144.15. Rewrites each log body into a map ("message" plus
+  # any JSON fields) for SigNoz's JSON log body, keeping the original body for
+  # the regular `body` column. SigNoz places the log pipelines built in the UI
+  # just before it, so they still see raw bodies. The structured copy costs
+  # extra storage and is only queried with SigNoz's experimental JSON-body
+  # flag; drop this processor from the logs pipeline to skip that cost.
+  signozlogsnormalizer: {}
+
+  # Drops anything timestamped more than 15 days ago, matching the age limit
+  # the logs and traces exporters apply today. Metrics had no limit until now.
+  # SigNoz is moving that check out of the exporters and into this processor,
+  # so it is what keeps old data out once that ships. Raise the window if you
+  # backfill older telemetry on purpose.
+  filter/drop_stale:
+    error_mode: ignore
+    logs:
+      log_record:
+        - time_unix_nano != 0 and time < Now() - Duration("360h")
+        - time_unix_nano == 0 and observed_time_unix_nano != 0 and observed_time < Now() - Duration("360h")
+    metrics:
+      datapoint:
+        - time_unix_nano != 0 and time < Now() - Duration("360h")
+    traces:
+      span:
+        - start_time_unix_nano != 0 and start_time < Now() - Duration("360h")
 
 connectors:
   # Feeds SigNoz's own usage/metering views.
@@ -165,17 +192,17 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, signozspanmetrics/delta, signozspanmapper, signozllmpricing, batch]
+      processors: [memory_limiter, signozspanmetrics/delta, signozspanmapper, signozllmpricing, filter/drop_stale, batch]
       exporters: [clickhousetraces, signozmeter, metadataexporter]
 
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, filter/drop_stale, batch]
       exporters: [signozclickhousemetrics, signozmeter, metadataexporter]
 
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, signozlogsnormalizer, filter/drop_stale, batch]
       exporters: [clickhouselogsexporter, signozmeter, metadataexporter]
 
     metrics/meter:

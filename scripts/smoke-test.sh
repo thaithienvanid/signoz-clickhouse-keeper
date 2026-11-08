@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # End-to-end check against a running stack: send a trace, a metric and a log,
-# then confirm they landed in ClickHouse.
+# then confirm they landed in ClickHouse. Also sends an LLM span and confirms
+# SigNoz's span mapper and LLM pricer processed it.
 #
 #   scripts/smoke-test.sh [stack]
 #
@@ -26,8 +27,8 @@ OTLP_AUTH_HEADER="${OTLP_AUTH_HEADER:-}"
 read -r -a CURL_EXTRA <<< "${CURL_OPTS:-}"
 
 case "$STACK" in
-    standalone) COMPOSE="deploy/standalone/docker-compose.yaml"; CH_CONTAINER="signoz-clickhouse" ;;
-    ha)         COMPOSE="deploy/ha/docker-compose.yaml";         CH_CONTAINER="signoz-clickhouse-1" ;;
+    standalone) COMPOSE="deploy/standalone/docker-compose.yaml"; CH_CONTAINER="signoz-clickhouse";   COLLECTORS="otel-collector" ;;
+    ha)         COMPOSE="deploy/ha/docker-compose.yaml";         CH_CONTAINER="signoz-clickhouse-1"; COLLECTORS="otel-collector-1 otel-collector-2" ;;
     *) echo "error: unknown stack '${STACK}' (expected standalone or ha)" >&2; exit 1 ;;
 esac
 
@@ -59,24 +60,23 @@ post_otlp() {
     curl "${args[@]}"
 }
 
-# Runs a query and leaves the server's error message in CH_ERR rather than
-# discarding it. Swallowing stderr here turns "column does not exist" into an
-# empty result, which is indistinguishable from "no rows yet" — a poll loop
-# then spins to its timeout and reports the wrong cause.
-CH_ERR=""
+# Runs a query and keeps the server's error message rather than discarding it.
+# Swallowing stderr here turns "column does not exist" into an empty result,
+# which is indistinguishable from "no rows yet" — a poll loop then spins to its
+# timeout and reports the wrong cause.
+#
+# The message goes to a file, read back with ch_err. A variable would not
+# survive: callers run this inside $( ), a subshell, so anything it assigns
+# is gone by the time they look.
+CH_ERR_FILE="$(mktemp)"
+trap 'rm -f "$CH_ERR_FILE"' EXIT
 ch_query() {
-    local out rc err_file
-    err_file="$(mktemp)"
-    out="$(docker exec "$CH_CONTAINER" clickhouse-client \
+    docker exec "$CH_CONTAINER" clickhouse-client \
         --user "${CLICKHOUSE_USER:-signoz}" \
         --password "${CLICKHOUSE_PASSWORD:-}" \
-        "${@:2}" --query "$1" 2>"$err_file")"
-    rc=$?
-    CH_ERR="$(tr '\n' ' ' < "$err_file" | cut -c1-400)"
-    rm -f "$err_file"
-    printf '%s' "$out"
-    return $rc
+        "${@:2}" --query "$1" 2>"$CH_ERR_FILE"
 }
+ch_err() { tr '\n' ' ' < "$CH_ERR_FILE" | cut -c1-400; }
 
 # ── Containers ───────────────────────────────────────────────────────────────
 head_ "containers"
@@ -192,13 +192,150 @@ if [ "$found_traces" = true ]; then
 else
     fail "no trace for service '${RUN_ID}' after 60s"
     # Say why. A query error and an empty table look identical otherwise.
-    if [ -n "$CH_ERR" ]; then
-        echo "        clickhouse error: ${CH_ERR}"
+    err="$(ch_err)"
+    if [ -n "$err" ]; then
+        echo "        clickhouse error: ${err}"
     fi
     total=$(ch_query "SELECT count() FROM signoz_traces.distributed_signoz_index_v3") || true
     echo "        rows in distributed_signoz_index_v3: ${total:-<query failed>}"
-    [ -n "$CH_ERR" ] && echo "        (${CH_ERR})"
-    echo "        collector logs: docker compose -f ${COMPOSE} logs otel-collector"
+    err="$(ch_err)"; [ -n "$err" ] && echo "        (${err})"
+    echo "        collector logs: docker compose -f ${COMPOSE} logs ${COLLECTORS}"
+fi
+
+# ── GenAI ────────────────────────────────────────────────────────────────────
+# SigNoz's LLM views read gen_ai.* span attributes. Most LLM instrumentations
+# emit their own keys instead, and SigNoz bridges that with span-mapper groups:
+# it seeds them when the organization is created and pushes them over OpAMP to
+# signozspanmapper. This sends an LLM span in OpenInference's keys and checks
+# each field the LLM views and the pricer read is stored under its gen_ai.*
+# name: model, provider, input and output tokens, cache-read and cache-write
+# tokens, and reasoning tokens. That happens only if the groups reached the
+# collector and the mapper is in the traces pipeline.
+#
+# The span also carries a fake signoz.gen_ai cost. signozllmpricing always
+# strips that prefix, rules or not, so its absence proves the pricer runs too.
+#
+# The span is re-sent every round: the OpAMP push that carries the groups can
+# trail the one that ended no-op mode, and a span processed before it arrived
+# is stored unmapped for good.
+head_ "GenAI"
+GENAI_SVC="${RUN_ID}-genai"
+
+genai_span() {
+    local now
+    now="$(date +%s)000000000"
+    cat <<JSON
+{"resourceSpans":[{"resource":{"attributes":[
+  {"key":"service.name","value":{"stringValue":"${GENAI_SVC}"}}]},
+  "scopeSpans":[{"spans":[{
+    "traceId":"$(openssl rand -hex 16)","spanId":"$(openssl rand -hex 8)",
+    "name":"ChatCompletion","kind":3,
+    "startTimeUnixNano":"${now}","endTimeUnixNano":"${now}",
+    "attributes":[
+      {"key":"openinference.span.kind","value":{"stringValue":"LLM"}},
+      {"key":"llm.provider","value":{"stringValue":"openai"}},
+      {"key":"llm.model_name","value":{"stringValue":"smoke-model"}},
+      {"key":"llm.token_count.prompt","value":{"intValue":"12"}},
+      {"key":"llm.token_count.completion","value":{"intValue":"34"}},
+      {"key":"llm.token_count.prompt_details.cache_read","value":{"intValue":"5"}},
+      {"key":"llm.token_count.prompt_details.cache_write","value":{"intValue":"3"}},
+      {"key":"llm.token_count.completion_details.reasoning","value":{"intValue":"7"}},
+      {"key":"signoz.gen_ai.usage.tokens.cost","value":{"doubleValue":999}}]}]}]}]}
+JSON
+}
+
+GENAI_MAPPED="SELECT count() FROM signoz_traces.distributed_signoz_index_v3
+              WHERE resources_string['service.name'] = {svc:String}
+                AND attributes_string['gen_ai.request.model'] = 'smoke-model'"
+
+# Each field of the newest mapped span, '<absent>' when the key is missing
+# (a bare map lookup would return 0 or '' and hide that). Joined with '|'
+# rather than left as TSV: tab is whitespace to read, so an empty field
+# between two tabs would vanish and shift every later value.
+GENAI_FIELDS="SELECT arrayStringConcat([
+    if(mapContains(attributes_string, 'gen_ai.provider.name'),
+       attributes_string['gen_ai.provider.name'], '<absent>'),
+    if(mapContains(attributes_number, 'gen_ai.usage.input_tokens'),
+       toString(attributes_number['gen_ai.usage.input_tokens']), '<absent>'),
+    if(mapContains(attributes_number, 'gen_ai.usage.output_tokens'),
+       toString(attributes_number['gen_ai.usage.output_tokens']), '<absent>'),
+    if(mapContains(attributes_number, 'gen_ai.usage.cache_read.input_tokens'),
+       toString(attributes_number['gen_ai.usage.cache_read.input_tokens']), '<absent>'),
+    if(mapContains(attributes_number, 'gen_ai.usage.cache_creation.input_tokens'),
+       toString(attributes_number['gen_ai.usage.cache_creation.input_tokens']), '<absent>'),
+    if(mapContains(attributes_number, 'gen_ai.usage.reasoning.output_tokens'),
+       toString(attributes_number['gen_ai.usage.reasoning.output_tokens']), '<absent>'),
+    if(mapContains(attributes_number, 'signoz.gen_ai.usage.tokens.cost'), 'present', 'stripped')
+  ], '|')
+  FROM signoz_traces.distributed_signoz_index_v3
+  WHERE resources_string['service.name'] = {svc:String}
+    AND attributes_string['gen_ai.request.model'] = 'smoke-model'
+  ORDER BY timestamp DESC LIMIT 1"
+
+expect() {
+    local label="$1" got="$2" want="$3"
+    if [ "$got" = "$want" ]; then
+        pass "${label} = ${want}"
+    else
+        fail "${label}: expected ${want}, got '${got}'"
+    fi
+}
+
+echo "  sending an OpenInference LLM span every 5s, for up to 90s..."
+mapped=0 post_code=""
+for _ in $(seq 1 18); do
+    post_code=$(post_otlp /v1/traces "$(genai_span)")
+    sleep 5
+    if n=$(ch_query "$GENAI_MAPPED" --param_svc="$GENAI_SVC"); then
+        mapped="${n:-0}"
+        [ "$mapped" -gt 0 ] 2>/dev/null && break
+    fi
+done
+
+if [ "${mapped:-0}" -gt 0 ] 2>/dev/null; then
+    pass "llm.model_name mapped to gen_ai.request.model"
+    IFS='|' read -r provider t_in t_out t_cache_read t_cache_write t_reasoning cost \
+        <<< "$(ch_query "$GENAI_FIELDS" --param_svc="$GENAI_SVC")"
+    err="$(ch_err)"; [ -n "$err" ] && echo "        clickhouse error: ${err}"
+    expect "gen_ai.provider.name"                    "$provider"      "openai"
+    expect "gen_ai.usage.input_tokens"               "$t_in"          "12"
+    expect "gen_ai.usage.output_tokens"              "$t_out"         "34"
+    expect "gen_ai.usage.cache_read.input_tokens"    "$t_cache_read"  "5"
+    expect "gen_ai.usage.cache_creation.input_tokens" "$t_cache_write" "3"
+    expect "gen_ai.usage.reasoning.output_tokens"    "$t_reasoning"   "7"
+    if [ "$cost" = "stripped" ]; then
+        pass "client-sent signoz.gen_ai cost stripped (signozllmpricing is running)"
+    else
+        fail "client-sent signoz.gen_ai cost was ${cost:-unreadable} — signozllmpricing is not in the traces pipeline"
+    fi
+else
+    fail "no LLM span stored with gen_ai.request.model after 90s"
+    err="$(ch_err)"; [ -n "$err" ] && echo "        clickhouse error: ${err}"
+    raw=$(ch_query "SELECT count() FROM signoz_traces.distributed_signoz_index_v3
+                    WHERE resources_string['service.name'] = {svc:String}" --param_svc="$GENAI_SVC") || true
+    if [ "${raw:-0}" -gt 0 ] 2>/dev/null; then
+        echo "        ${raw} LLM span(s) stored, none with gen_ai.request.model."
+        # Show what was actually stored and what the collector actually runs,
+        # so the cause is in this output rather than guessed at.
+        echo "        newest LLM span, LLM-related attributes as stored:"
+        ch_query "SELECT arrayStringConcat(arrayMap(k -> concat(k, '=', attributes_string[k]),
+                      arrayFilter(k -> k LIKE 'gen_ai.%' OR k LIKE 'llm.%' OR k LIKE 'signoz.%', mapKeys(attributes_string))), ', '),
+                         arrayStringConcat(arrayMap(k -> concat(k, '=', toString(attributes_number[k])),
+                      arrayFilter(k -> k LIKE 'gen_ai.%' OR k LIKE 'llm.%' OR k LIKE 'signoz.%', mapKeys(attributes_number))), ', ')
+                  FROM signoz_traces.distributed_signoz_index_v3
+                  WHERE resources_string['service.name'] = {svc:String}
+                  ORDER BY timestamp DESC LIMIT 1" --param_svc="$GENAI_SVC" \
+            | tr '\t' '\n' | sed 's/^/          /'
+        err="$(ch_err)"; [ -n "$err" ] && echo "          (${err})"
+        collector="${COLLECTORS%% *}"
+        echo "        mapper config the collector runs (${collector}, effective config):"
+        docker compose -f "$COMPOSE" exec -T "$collector" cat /var/tmp/collector-config.yaml 2>&1 \
+            | grep -n -E 'signozspanmapper|signozllmpricing|groups:|- id:|exists_any|target: gen_ai\.(request\.model|provider\.name)|error|No such' \
+            | head -30 | sed 's/^/          /'
+    else
+        echo "        no LLM spans stored at all; the last POST /v1/traces returned ${post_code:-no response}"
+    fi
+    echo "        collector logs: docker compose -f ${COMPOSE} logs ${COLLECTORS}"
 fi
 
 # ── Replication (HA only) ────────────────────────────────────────────────────
