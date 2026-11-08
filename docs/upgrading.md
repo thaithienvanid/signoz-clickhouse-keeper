@@ -35,6 +35,18 @@ carry the `signozspanmapper` and `signozllmpricing` processors, which SigNoz
 configures over OpAMP. `scripts/validate.sh` checks both collector configs for
 them.
 
+The collector configs in this repo set a floor of their own: collector
+**v0.144.15**, because their logs pipeline runs `signozlogsnormalizer`.
+
+- **Before v0.144.13** the processor does not exist, so the collector rejects
+  the config and never starts.
+- **v0.144.13 and v0.144.14** load it, but they predate the JSON sanitizing
+  v0.144.15 added to the exporters. Foundry enables the normalizer only from
+  v0.144.15.
+
+To run an older collector, remove the processor from both stacks' logs
+pipeline first.
+
 Docker Hub will happily offer you `clickhouse/clickhouse-server:latest`, which
 is a 26.x release. Using it means running a combination SigNoz does not test.
 An earlier revision of this repo pinned 26.1.3.52 for exactly that reason, and

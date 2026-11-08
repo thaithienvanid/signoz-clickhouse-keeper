@@ -151,8 +151,8 @@ up -d --wait` will therefore either come up clean or fail loudly.
 |---|---|---|
 | `clickhouse/clickhouse-server` | `25.12.5` | **Hard requirement.** See below. |
 | `clickhouse/clickhouse-keeper` | `25.12.5` | Must match the server |
-| `signoz/signoz` | `v0.144.0` | Latest release |
-| `signoz/signoz-otel-collector` | `v0.144.12` | Latest release; also supplies the schema migrator |
+| `signoz/signoz` | `v0.149.0` | Latest release |
+| `signoz/signoz-otel-collector` | `v0.144.15` | Latest release; also supplies the schema migrator |
 | `postgres` (HA) | `16-alpine` | Metastore |
 | `nginx` (HA) | `1.30-alpine` | Load balancer |
 

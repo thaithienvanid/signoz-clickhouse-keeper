@@ -29,10 +29,10 @@ spec:
 
   signoz:
     spec:
-      image: signoz/signoz:v0.144.0
+      image: signoz/signoz:v0.149.0
   ingester:
     spec:
-      image: signoz/signoz-otel-collector:v0.144.12
+      image: signoz/signoz-otel-collector:v0.144.15
   telemetrystore:
     spec:
       image: clickhouse/clickhouse-server:25.12.5

@@ -34,13 +34,13 @@ jobs:
       # the runbook was checked against.
       - name: Install foundryctl
         env:
-          FOUNDRY_VERSION: v0.3.0
+          FOUNDRY_VERSION: v0.5.0
           # sha256 of foundry_linux_amd64.tar.gz, from the release's
-          # foundry_0.3.0_checksums.txt. Pinned here rather than read from
+          # foundry_0.5.0_checksums.txt. Pinned here rather than read from
           # that file at run time: the file comes from the same release, so
           # it would catch corruption but not a release that changes under the
           # same tag. Bump it together with FOUNDRY_VERSION.
-          FOUNDRY_SHA256: 7555f91ee87a9d0d517009fc859ef64be76ad8b045446b2fe4360b896dc5838d
+          FOUNDRY_SHA256: b2f21e0cf12e9fa0f32dcaf414ec97823b32a29c3252bee23b896d158af2c650
         # GitHub's release download host returns transient 502/503s, which
         # once failed this whole job. Retry them, and download to a file
         # rather than piping into tar: curl writes a retried transfer after
