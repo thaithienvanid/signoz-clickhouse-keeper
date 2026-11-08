@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-11-08 — SigNoz v0.149.0 and collector v0.144.15
+## 2026-11-08 — SigNoz v0.149.0; GenAI observability checked end to end
 
 ### Before you upgrade
 
@@ -103,6 +103,56 @@ logs:    memory_limiter, signozlogsnormalizer, filter/drop_stale, batch
 - **`docs/standalone.md` documents the processors.** It already had a table of
   the exporters; it now has one for the processors too, in pipeline order,
   with what each is for.
+
+### GenAI / LLM observability
+
+The ingestion side already had what SigNoz's LLM views need. What was missing
+was proof that it works, and guidance for the application side, which is where
+it usually goes wrong.
+
+- **What SigNoz needs (as of v0.149.0)**:
+  - It builds its LLM views from `gen_ai.*` **span attributes** only. GenAI
+    metrics and log events are stored but not read.
+  - It bridges vendor instrumentations with span-mapper groups, which it seeds
+    when the organization is created and pushes to `signozspanmapper` over
+    OpAMP.
+  - It computes cost in `signozllmpricing`, from pricing rules.
+  - Both processors were already in both stacks' traces pipelines.
+- **New: `scripts/smoke-test.sh` checks the GenAI path end to end.**
+  - **What it sends:** an LLM span in OpenInference's keys (`llm.model_name`,
+    `llm.provider`, `llm.token_count.*`).
+  - **Mapper check:** it asserts the span is stored with `gen_ai.request.model`
+    and `gen_ai.provider.name`, and with every token count the views and the
+    pricer read: input, output, cache-read, cache-write and reasoning. Each is
+    its own pass/fail line, and a missing field is reported as `<absent>`.
+    That proves the mapper groups were seeded, pushed and applied.
+  - **Pricer check:** the span also carries a fake
+    `signoz.gen_ai.usage.tokens.cost`. The pricer always strips that prefix, so
+    its absence proves the pricer is in the pipeline without needing any
+    pricing rule.
+  - **Retries:** the span is re-sent each round, because the push carrying
+    the groups can trail the one that took the collector out of no-op mode.
+  - **On failure** it says whether the spans arrived unmapped or not at all.
+    It also prints the LLM attributes of the newest stored span, and the mapper
+    and pricer lines of the collector's effective config.
+- **New: an "LLM and agent applications" section in `docs/agents.md`.** It
+  covers the instrumentations the mapper handles and the content-capture
+  setting most often got wrong:
+  - **OpenTelemetry's GenAI instrumentations.** The legacy
+    `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` writes prompts
+    as log events, which the LLM views never read. Prompts reach spans only
+    with `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` plus
+    `span_only` (checked against `opentelemetry-util-genai` and
+    `opentelemetry-instrumentation-openai-v2`).
+  - **OpenLLMetry** captures content by default.
+  - **Cost:** a self-hosted SigNoz ships no price list, so costs stay empty
+    until pricing rules are added. The section also covers what is priced:
+    input, output, cache-read and cache-write tokens, with cache counts
+    treated as part of input. Reasoning tokens are priced as output, and token
+    counts sent as strings are priced as zero.
+  - **Limits:** the OTLP size limits for prompt-heavy traffic.
+- **Collector config comment:** the pricer's comment now says that costs need
+  pricing rules.
 
 ### CI
 

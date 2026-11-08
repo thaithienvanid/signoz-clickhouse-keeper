@@ -182,6 +182,9 @@ The processors, in pipeline order. The pipelines are `traces`, `metrics` and
 | `filter/drop_stale` | all | Drops data timestamped more than 15 days ago |
 | `batch` | all | Batches writes to ClickHouse. Last, so it batches only what survived the rest |
 
+See [agents.md](agents.md#llm-and-agent-applications) for what LLM telemetry
+needs from the application side.
+
 `sending_queue` is disabled on the ClickHouse exporters, matching upstream: they
 batch and retry internally, and an in-memory queue on top mostly adds data to
 lose on restart. For durability across restarts, apply the `persistent-queue`

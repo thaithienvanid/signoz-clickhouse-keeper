@@ -36,7 +36,7 @@ Then open <http://localhost:8080>.
 | [`docs/production.md`](docs/production.md) | Going from one host to a real multi-host cluster |
 | [`docs/upgrading.md`](docs/upgrading.md) | Version policy and upgrade procedure |
 | [`docs/foundry.md`](docs/foundry.md) | Should you move to SigNoz Foundry, and the runbook if so |
-| [`docs/agents.md`](docs/agents.md) | Pointing application SDKs at the gateway |
+| [`docs/agents.md`](docs/agents.md) | Pointing application SDKs at the gateway, including LLM and agent apps |
 
 ---
 
