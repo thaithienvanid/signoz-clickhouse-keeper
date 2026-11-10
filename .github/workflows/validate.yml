@@ -73,18 +73,25 @@ jobs:
 
   # Actually stands the standalone stack up and pushes telemetry through it.
   # Static validation cannot catch a wrong env var name or a config the
-  # collector rejects at load time; this can.
+  # collector rejects at load time; this can. Once per sizing profile, so the
+  # footprints in docs/standalone.md#sizing are re-measured on every run and
+  # a profile whose limits stop holding fails here instead of on a laptop.
   e2e:
+    name: e2e (${{ matrix.sizing }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sizing: [dev, default]
     steps:
       - uses: actions/checkout@v7
 
       - name: Configure the stack
-        working-directory: deploy/standalone
         run: |
-          cp .env.example .env
-          sed -i "s/^CLICKHOUSE_PASSWORD=.*/CLICKHOUSE_PASSWORD=ci-$(openssl rand -hex 12)/" .env
+          cp deploy/standalone/.env.example deploy/standalone/.env
+          sed -i "s/^CLICKHOUSE_PASSWORD=.*/CLICKHOUSE_PASSWORD=ci-$(openssl rand -hex 12)/" deploy/standalone/.env
+          ./scripts/apply-sizing.sh standalone "${{ matrix.sizing }}"
 
       - name: Start
         working-directory: deploy/standalone
@@ -100,11 +107,36 @@ jobs:
       - name: Smoke test
         run: ./scripts/smoke-test.sh standalone
 
+      # Three minutes of steady ingest with dashboard queries running, then
+      # every row is accounted for. A memory_limiter refusal fails it.
+      - name: Load test
+        env:
+          SIGNOZ_ADMIN_PASSWORD: Ci-Bootstrap-1!
+        run: python3 scripts/load-test.py --duration 180 --rate 200 --query
+
+      # Fails if anything was OOM-killed or restarted under that load. The
+      # exit code is kept by hand: the default shell has no pipefail, so
+      # `| tee` would hide it, and the summary is wanted either way.
+      - name: Footprint
+        run: |
+          rc=0
+          ./scripts/footprint.sh standalone --check > footprint.txt || rc=$?
+          cat footprint.txt
+          {
+            echo "### Footprint: sizing profile \`${{ matrix.sizing }}\`"
+            echo "After the smoke test and 180s at 200 spans, logs and metric points per second."
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' footprint.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
       - name: Diagnostics on failure
         if: failure()
         working-directory: deploy/standalone
         run: |
           docker compose ps
+          ../../scripts/footprint.sh standalone || true
           for svc in clickhouse-keeper clickhouse schema-migrator signoz otel-collector; do
             echo "::group::$svc"
             docker compose logs --tail=200 "$svc" || true

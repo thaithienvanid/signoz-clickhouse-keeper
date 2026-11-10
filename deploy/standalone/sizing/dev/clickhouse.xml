@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse server tuning for SIZING_PROFILE=dev: one machine, low ingest,
+  as little memory as it will run in. See docs/standalone.md#sizing.
+
+  ClickHouse's own guidance for hosts with under 16 GB of RAM, from the docs
+  for the version pinned here (docs/en/operations/tips.md, "Using less than
+  16GB of RAM"): it can run "as low as 2 GB, but these setups require
+  additional tuning and can only ingest at a low rate". This file is that
+  tuning. The query-side half is in clickhouse-users.xml next to it.
+
+  Mounted as config.d/zz-sizing.xml. ClickHouse merges config.d in sorted
+  path order (ConfigProcessor::getConfigMergeFiles), so this lands after
+  signoz.xml. That order matters: signoz.xml sets TTLs on the log tables
+  removed below, and merged after this file it would bring them back.
+-->
+<clickhouse>
+    <!--
+      Caches. Each defaults to a fixed maximum (5 GiB for marks, the primary
+      index and index marks) capped at half of the container's memory
+      (cache_size_to_ram_max_ratio = 0.5). In dev's 1 GiB container that
+      still lets each of the three take 512 MiB, together more than the
+      server's 922 MiB cap. Set explicitly, they total 800 MiB with the query
+      condition cache and stay there if the limit is raised. The docs: "Lower
+      the size of the mark cache ... as low as 500 MB, but it cannot be set
+      to zero."
+    -->
+    <mark_cache_size>536870912</mark_cache_size>            <!-- 512 MiB; default 5 GiB -->
+    <primary_index_cache_size>134217728</primary_index_cache_size> <!-- 128 MiB; default 5 GiB -->
+    <index_mark_cache_size>134217728</index_mark_cache_size>       <!-- 128 MiB; default 5 GiB -->
+    <query_condition_cache_size>33554432</query_condition_cache_size> <!-- 32 MiB; default 100 MiB -->
+
+    <!--
+      Merges. Not in the docs' list, but on this schema they are the largest
+      memory user. A horizontal merge holds read and write buffers for every
+      column of every part at once, and signoz_index_v3 has 109 columns and
+      30 skip indexes: measured at 450-495 MiB per merge even for parts of
+      1-5 MiB. A vertical merge does the sort key first and then one column
+      at a time (77 MiB measured for a bigger merge of the same table).
+      ClickHouse only goes vertical from 131072 rows, which a low-ingest box
+      rarely reaches, so go vertical from the first row. Merges that apply
+      TTL deletes stay horizontal regardless.
+    -->
+    <merge_tree>
+        <vertical_merge_algorithm_min_rows_to_activate>1</vertical_merge_algorithm_min_rows_to_activate>
+    </merge_tree>
+
+    <!--
+      background_pool_size is deliberately left alone. It is not in the docs'
+      list, and lowering it far breaks startup: ClickHouse refuses to load
+      MergeTree tables when background_pool_size x
+      background_merges_mutations_concurrency_ratio (by default 16 x 2) is
+      below number_of_free_entries_in_pool_to_execute_optimize_entire_partition
+      (25). MergeTreeSettingsImpl::sanityCheck throws BAD_ARGUMENTS.
+    -->
+
+    <!--
+      The docs: "disable writing in log tables, as it keeps the background
+      merge task reserving RAM to perform merges of log tables. Disable
+      asynchronous_metric_log, metric_log, text_log, trace_log." Nothing in
+      this repo reads them. query_log stays: it is what you debug slow
+      queries with.
+    -->
+    <asynchronous_metric_log remove="1"/>
+    <metric_log remove="1"/>
+    <text_log remove="1"/>
+    <trace_log remove="1"/>
+</clickhouse>

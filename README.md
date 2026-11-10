@@ -29,7 +29,7 @@ Then open <http://localhost:8080>.
 | [`deploy/standalone/`](deploy/standalone/) | Single-node stack: 1 Keeper, 1 ClickHouse, SQLite metastore |
 | [`deploy/ha/`](deploy/ha/) | HA stack: 3 Keepers, 3 ClickHouse replicas, Postgres, 2 backends, 2 collectors, nginx |
 | [`deploy/security/`](deploy/security/README.md) | Auth and TLS fragments merged into a stack on demand |
-| [`scripts/`](scripts/) | Validation, smoke test, backup/restore, certificate and credential generation |
+| [`scripts/`](scripts/) | Validation, smoke and load tests, footprint, sizing, backup/restore, certificate and credential generation |
 | [`docs/standalone.md`](docs/standalone.md) | Single-node walkthrough and configuration reference |
 | [`docs/ha.md`](docs/ha.md) | HA architecture, deployment, and failover testing |
 | [`docs/operations.md`](docs/operations.md) | Monitoring, backup, scaling, tuning, troubleshooting |
@@ -177,6 +177,7 @@ See [docs/upgrading.md](docs/upgrading.md) for the upgrade procedure.
 ```bash
 make init                     # writes deploy/standalone/.env from the example
 $EDITOR deploy/standalone/.env    # set CLICKHOUSE_PASSWORD
+make sizing PROFILE=dev       # optional: one machine, as little memory as it runs in
 make up
 make bootstrap                # create the organization and admin account
 make smoke                    # send telemetry and confirm it is queryable
@@ -202,6 +203,7 @@ make logs SERVICE=clickhouse  # one service
 make keeper-status            # Raft leader / follower state
 make cluster-status           # ClickHouse cluster membership
 make backup                   # config + metastore + ClickHouse
+make footprint                # memory and CPU per container against its limits
 make down                     # stop, keep data
 make nuke                     # stop and delete every volume
 ```
@@ -235,15 +237,22 @@ XML config             every Keeper and ClickHouse file is well-formed
 YAML config            every collector and fragment file parses
 HA replica identity    the three macros files declare three distinct replicas
 ClickHouse cluster     both stacks name their cluster 'cluster'
+collector pipelines    the processors SigNoz configures over OpAMP are present,
+                       in the order it expects
+sizing profiles        each profile is complete, and default matches .env.example
+Foundry casting        its image pins match .env.example, and it forges cleanly
 security fragments     all 10 stack x fragment combinations merge, and none
                        drops signoz_health_check from service.extensions
 image tags             every pinned tag still resolves on Docker Hub
 shell scripts          shellcheck
 ```
 
-CI additionally stands the standalone stack up for real and pushes telemetry
-through it, which is the only way to catch a mistyped environment variable or a
-config the collector rejects at load time.
+CI additionally stands the standalone stack up for real, once per sizing
+profile, and pushes telemetry through it. That is the only way to catch a
+mistyped environment variable or a config the collector rejects at load time.
+It then runs three minutes of load with dashboard queries (`make load`) and
+fails if any container was OOM-killed or restarted (`make footprint`), so the
+measured footprints below are re-checked on every push.
 
 ---
 
@@ -268,11 +277,28 @@ comment.
 
 ## Requirements
 
-**Standalone** — 4 cores, 16 GB RAM, 100 GB SSD; Docker Engine 24+ with Compose
-v2. It will start on 8 GB, but ClickHouse merges will fight your applications
-for memory.
+Docker Engine 24+ with Compose v2, and about 3 GB of disk for the images
+(640 MiB to download).
 
-**HA** — see [docs/ha.md](docs/ha.md) and
+**Standalone, `dev` profile** (`make sizing PROFILE=dev`): for one machine and
+low ingest. Any core count, and 2 GB of memory free for containers. Its limits
+add up to 1.9 GiB, so it cannot use more. On a simulated 2 GiB machine it held
+500 spans, 500 logs and 500 metric points per second for five minutes, with
+heavy queries running, at a peak of 651 MiB resident, and did the same pinned
+to a single core.
+
+**Standalone, `default` profile**: 4 cores, and for real traffic 16 GB RAM and
+100 GB SSD. The 4 cores are a hard floor: Docker refuses to start a container
+whose CPU limit is above the host's core count, and ClickHouse's is 4. The
+memory is not a floor. `default` also ran in 2 GiB in the same test, but
+nothing caps it there: ClickHouse sizes itself to the host and grows into that
+as data accumulates.
+
+The measurements behind these are in
+[docs/standalone.md](docs/standalone.md#sizing). CI repeats the lighter one for
+both profiles on every push; the 2 GiB test was run by hand.
+
+**HA**: see [docs/ha.md](docs/ha.md) and
 [docs/production.md](docs/production.md). Running all three replicas on one
 Docker host, which is what `deploy/ha/` does out of the box, is a way to test
 failover behaviour; it is not fault tolerant, because the host is a single point

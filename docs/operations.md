@@ -261,6 +261,46 @@ justify in production.
 If Keeper writes are genuinely your bottleneck, put its `log_storage_path` on a
 dedicated fast disk before you weaken durability.
 
+**What ClickHouse asks Keeper.** `system.aggregated_zookeeper_log`, on by
+default, counts ClickHouse's requests to Keeper each second, by parent path
+and operation, with their result codes and average latency in microseconds:
+
+```sql
+SELECT parent_path, operation,
+       sum(count) AS requests,
+       round(sum(average_latency * count) / sum(count)) AS avg_latency_us,
+       sumMap(errors) AS results
+FROM system.aggregated_zookeeper_log
+WHERE event_time > now() - INTERVAL 1 HOUR
+GROUP BY parent_path, operation
+ORDER BY requests DESC LIMIT 20;
+```
+
+`results` counts every outcome, `ZOK` included. `ZNONODE` and `ZNODEEXISTS`
+are routine, because replication checks for nodes that may or may not exist.
+A growing `ZCONNECTIONLOSS`, `ZSESSIONEXPIRED` or `ZOPERATIONTIMEOUT` count is a
+Keeper problem.
+
+`system.zookeeper_log` is the unaggregated version: two rows for every request,
+the request and its response, with the node data. The name predates Keeper; it
+logs requests to whatever `<zookeeper>` points at, which here is Keeper. It is
+off, in the ClickHouse image and in this repo, because of its size. A fresh
+standalone stack writes about 700,000 rows (17 MiB) to it during the schema
+migration alone, nearly all of them ClickHouse polling the distributed DDL
+queue. To debug one problem, add this as a ClickHouse `config.d` file (in this
+repo, a volume line next to `signoz.xml`'s in the compose file), recreate
+ClickHouse, and take it out again afterwards:
+
+```xml
+<clickhouse>
+    <zookeeper_log>
+        <database>system</database>
+        <table>zookeeper_log</table>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </zookeeper_log>
+</clickhouse>
+```
+
 ---
 
 ## Troubleshooting

@@ -10,6 +10,7 @@
 #   - every XML config is well-formed
 #   - every YAML config parses
 #   - security fragments merge cleanly onto both stacks
+#   - sizing profiles are complete and the default matches .env.example
 #   - image tags in .env.example actually exist on Docker Hub (needs network;
 #     skipped with --offline)
 #   - shell scripts pass shellcheck, if it is installed
@@ -49,6 +50,18 @@ else
             fail "${dir}/docker-compose.yaml"
             echo "$out" | sed 's/^/        /'
         fi
+
+        # Each sizing profile swaps the files mounted into ClickHouse.
+        for p in "${dir}"/sizing/*/; do
+            [ -d "$p" ] || continue
+            p=$(basename "$p")
+            if out=$(SIZING_PROFILE="$p" docker compose -f "${dir}/docker-compose.yaml" config 2>&1 >/dev/null); then
+                pass "${dir}/docker-compose.yaml with SIZING_PROFILE=${p}"
+            else
+                fail "${dir}/docker-compose.yaml with SIZING_PROFILE=${p}"
+                echo "$out" | sed 's/^/        /'
+            fi
+        done
 
         # The security overlay references a generated file, so generate one
         # first or the overlay validates against a path that does not exist.
@@ -158,6 +171,61 @@ PY
         echo "$out" | sed 's/^/        /'
     fi
 done
+
+# ── Sizing profiles ──────────────────────────────────────────────────────────
+# scripts/apply-sizing.sh copies limits.env into .env and compose mounts the
+# two XML files, so every profile needs all three, and its keys must be ones
+# .env.example (and so the compose file) actually uses.
+head_ "sizing profiles"
+if out=$(python3 - <<'PY' 2>&1
+import os, re, sys, yaml
+base = "deploy/standalone"
+def env(path):
+    return dict(re.findall(r"^([A-Z_]+)=(\S*)$", open(path).read(), re.M))
+example = env(f"{base}/.env.example")
+problems = []
+profiles = sorted(os.listdir(f"{base}/sizing"))
+for p in profiles:
+    d = f"{base}/sizing/{p}"
+    for f in ("clickhouse.xml", "clickhouse-users.xml", "limits.env"):
+        if not os.path.isfile(f"{d}/{f}"):
+            problems.append(f"{d}/{f} is missing")
+    if not os.path.isfile(f"{d}/limits.env"):
+        continue
+    limits = env(f"{d}/limits.env")
+    if limits.get("SIZING_PROFILE") != p:
+        problems.append(f"{d}/limits.env must set SIZING_PROFILE={p}")
+    for k in limits:
+        if k not in example:
+            problems.append(f"{d}/limits.env sets {k}, which .env.example does not have")
+    # Docker refuses a container whose CPU limit exceeds the host's cores; the
+    # dev profile promises to start on a single core.
+    if p == "dev":
+        for k, v in limits.items():
+            if k.endswith("_CPU_LIMIT") and float(v) > 1:
+                problems.append(f"{d}/limits.env: {k}={v}, but dev must start on one core")
+if "default" not in profiles:
+    problems.append(f"{base}/sizing/default is missing")
+else:
+    for k, v in env(f"{base}/sizing/default/limits.env").items():
+        if example.get(k) != v:
+            problems.append(f"sizing/default/limits.env {k}={v} but .env.example has {example.get(k)}")
+# The profile must merge after signoz.xml (whose log-table TTLs it removes)
+# and after the users.d file the image's entrypoint writes.
+mounts = yaml.safe_load(open(f"{base}/docker-compose.yaml"))["services"]["clickhouse"]["volumes"]
+for subdir, other in (("config.d", "signoz.xml"), ("users.d", "default-user.xml")):
+    # src:target:ro, where src itself contains ${SIZING_PROFILE:-default}
+    targets = [m.rsplit(":", 2)[1] for m in mounts if "/sizing/" in m and f"/{subdir}/" in m]
+    if len(targets) != 1 or os.path.basename(targets[0]) <= other:
+        problems.append(f"the sizing mount into {subdir} must sort after {other}: {targets}")
+sys.exit("\n".join(problems) if problems else 0)
+PY
+); then
+    pass "deploy/standalone/sizing: every profile complete, default matches .env.example"
+else
+    fail "deploy/standalone/sizing"
+    echo "$out" | sed 's/^/        /'
+fi
 
 # ── Foundry migration casting ────────────────────────────────────────────────
 # docs/foundry.md restores a standalone backup into the stack this casting
