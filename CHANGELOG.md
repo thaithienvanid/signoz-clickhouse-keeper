@@ -1,9 +1,12 @@
 # Changelog
 
-## 2026-11-10 — Less Keeper logging
+## 2026-11-10 — A `dev` sizing profile, measured footprints, and less Keeper logging
 
 ### Before you upgrade
 
+- **Nothing to change in `.env`.** It gains one key, `SIZING_PROFILE`, and
+  compose treats a missing one as `default`. `make up` recreates ClickHouse
+  once, because its mounts change.
 - **ClickHouse stops writing `system.zookeeper_log` and `system.session_log`,
   on both stacks.** Both are off in the ClickHouse image. `signoz.xml` and the
   HA `cluster.xml` turned them on by accident: they listed the two sections to
@@ -19,6 +22,42 @@
   `DROP TABLE system.zookeeper_log SYNC` removes them now.
   If you used `session_log` to audit logins, put the section back in a
   `config.d` file of your own.
+
+### Added
+
+- **`dev` sizing profile** for running the standalone stack on one machine for
+  testing: `make sizing PROFILE=dev && make up`. It caps the four services at
+  1.9 GiB of memory together and at most one core each, so it starts on any
+  machine. ClickHouse gets the tuning its documentation gives for low-memory
+  hosts (smaller caches, one query thread, four of its own log tables off). It
+  also merges vertically from the first row, which on this schema cut the
+  largest merge in the measured run from 463 MiB to 101 MiB. At low load
+  `default` fits in 2 GiB too, on a machine with 4 cores; what `dev` adds is
+  starting on fewer cores, a hard memory ceiling, and less background CPU. The
+  trade is ingest rate and query speed. `make sizing PROFILE=default` switches
+  back, and data is kept. Measured numbers, including a run on a simulated
+  2 GiB machine, are in [docs/standalone.md](docs/standalone.md#sizing).
+- **`make footprint`** (`scripts/footprint.sh`): memory and CPU per container
+  against its limits, restarts and OOM kills, and ClickHouse data size.
+  `--check` fails on an OOM kill or a restart.
+- **`make load`** (`scripts/load-test.py`): steady OTLP traces, logs and
+  metrics at a fixed rate, then checks that every span and log record reached
+  ClickHouse. `--query` also runs dashboard queries through the SigNoz API
+  while it loads. Python standard library only.
+- **CI runs the end-to-end job once per profile**, adding three minutes of load
+  with queries and a `footprint --check`. Each run's footprint goes to the job
+  summary.
+
+### Fixed
+
+- **The documented requirements were not measured, and missed a hard one.**
+  Docker refuses to start a container whose CPU limit exceeds the host's core
+  count, so the default `.env` (`CLICKHOUSE_CPU_LIMIT=4`) cannot start on fewer
+  than 4 cores at all. The README and docs/standalone.md now give measured
+  numbers per profile.
+- The header of `deploy/standalone/docker-compose.yaml` pointed at
+  `../security/compose.tls.yaml`, which does not exist. It now shows
+  `apply-security.sh` and `compose.security.yaml`.
 
 ## 2026-11-08 — SigNoz v0.149.0; GenAI observability checked end to end
 

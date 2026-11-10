@@ -8,8 +8,12 @@
 # the SigNoz backend all default to a ClickHouse cluster literally named
 # `cluster`, so `clickhouse/config.d/signoz.xml` must keep it.
 #
-# Optional overlays (see ../security/README.md):
-#   docker compose -f docker-compose.yaml -f ../security/compose.tls.yaml up -d
+# Optional security overlay (see ../security/README.md):
+#   ../../scripts/apply-security.sh standalone tls basic-auth
+#   docker compose -f docker-compose.yaml -f compose.security.yaml up -d
+#
+# Sizing: SIZING_PROFILE and the *_LIMIT variables in .env. For a dev box,
+# `make sizing PROFILE=dev` sets them together (see docs/standalone.md#sizing).
 
 name: signoz
 
@@ -100,6 +104,11 @@ services:
       # config.xml (and its docker_related_config.xml, which is what makes
       # ClickHouse listen on 0.0.0.0) stays intact underneath.
       - ./clickhouse/config.d/signoz.xml:/etc/clickhouse-server/config.d/signoz.xml:ro
+      # Memory tuning for SIZING_PROFILE (sizing/<profile>/). The zz- prefix
+      # makes ClickHouse merge these last, after signoz.xml and the users.d
+      # file the image's entrypoint writes.
+      - ./sizing/${SIZING_PROFILE:-default}/clickhouse.xml:/etc/clickhouse-server/config.d/zz-sizing.xml:ro
+      - ./sizing/${SIZING_PROFILE:-default}/clickhouse-users.xml:/etc/clickhouse-server/users.d/zz-sizing.xml:ro
       # Matches the image default `*_function.*ml` glob.
       - ./clickhouse/custom-function.xml:/etc/clickhouse-server/custom-function.xml:ro
       - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts:ro

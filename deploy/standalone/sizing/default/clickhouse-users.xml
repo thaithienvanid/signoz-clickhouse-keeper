@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<!--
+  Query settings for SIZING_PROFILE=default: none, so ClickHouse's defaults
+  apply. Mounted as users.d/zz-sizing.xml.
+-->
+<clickhouse/>

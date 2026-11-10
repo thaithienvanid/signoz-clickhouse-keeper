@@ -23,7 +23,8 @@ endif
 
 .DEFAULT_GOAL := help
 .PHONY: help init up down restart ps logs pull bootstrap validate smoke backup restore \
-        config clean nuke keeper-status cluster-status replication-status
+        config clean nuke keeper-status cluster-status replication-status \
+        sizing footprint load
 
 help: ## Show this help
 	@printf '\033[1mSigNoz self-hosting\033[0m  (STACK=$(STACK))\n\n'
@@ -76,6 +77,21 @@ backup: ## Back up config, metastore and ClickHouse
 restore: ## Restore from a backup: make restore FROM=backups/standalone-...
 	@test -n "$(FROM)" || { echo "usage: make restore FROM=backups/<dir>"; exit 1; }
 	@./scripts/restore.sh $(STACK) $(FROM)
+
+# ── Sizing ───────────────────────────────────────────────────────────────────
+# See docs/standalone.md#sizing for what each profile measured.
+
+sizing: ## Pick a sizing profile: make sizing PROFILE=dev (or default), then make up
+	@test -n "$(PROFILE)" || { echo "usage: make sizing PROFILE=dev|default"; exit 1; }
+	@./scripts/apply-sizing.sh $(STACK) $(PROFILE)
+
+footprint: ## Memory and CPU per container against its limits, and ClickHouse data size
+	@./scripts/footprint.sh $(STACK)
+
+DURATION ?= 300
+RATE     ?= 200
+load: ## Steady OTLP load, then check it all arrived (DURATION=300 RATE=200 per signal)
+	@python3 scripts/load-test.py --stack $(STACK) --duration $(DURATION) --rate $(RATE)
 
 # ── Diagnostics ──────────────────────────────────────────────────────────────
 

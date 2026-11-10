@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse server tuning for SIZING_PROFILE=default: none. ClickHouse sizes
+  its caches and memory cap from the container's memory limit, which it reads
+  from the cgroup. Mounted as config.d/zz-sizing.xml; ../dev/clickhouse.xml is
+  the low-memory alternative.
+-->
+<clickhouse/>
