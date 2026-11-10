@@ -130,6 +130,9 @@ Contents:
 - `<distributed_ddl>` with cleanup, so finished DDL entries do not accumulate
   in Keeper forever.
 - One-day TTLs on ClickHouse's own system logs, which are unbounded by default.
+  Only for tables the image already enables: listing a section is enough to
+  turn its table on, which is why `zookeeper_log` (two rows for every request
+  ClickHouse sends Keeper) and `session_log` are not there.
 
 ### `clickhouse/custom-function.xml`
 

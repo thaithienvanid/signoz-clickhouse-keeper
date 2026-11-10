@@ -62,8 +62,20 @@
         <task_max_lifetime>604800</task_max_lifetime>
     </distributed_ddl>
 
-    <!-- Bound ClickHouse's own system logs; on a busy cluster they otherwise
-         compete for disk with the telemetry you are actually storing. -->
+    <!--
+      Bound ClickHouse's own system logs; on a busy cluster they otherwise
+      compete for disk with the telemetry you are actually storing.
+
+      Only tables the image already enables are listed, because a section
+      here is enough to enable its table. zookeeper_log and session_log are
+      off in the image and stay off. zookeeper_log is ClickHouse's own log
+      of its requests to Keeper (the name predates Keeper, like <zookeeper>
+      above): two rows per request, the request and its response, with the
+      data read or written. The schema migrator alone makes about 700,000.
+      aggregated_zookeeper_log, on by default, keeps per-second counts,
+      result codes and latency instead; docs/operations.md shows how to read
+      it, and how to turn zookeeper_log on to debug something.
+    -->
     <query_log>
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
         <flush_interval_milliseconds>30000</flush_interval_milliseconds>
@@ -89,16 +101,10 @@
     <asynchronous_metric_log>
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </asynchronous_metric_log>
-    <session_log>
-        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
-    </session_log>
     <text_log>
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
         <flush_interval_milliseconds>30000</flush_interval_milliseconds>
     </text_log>
-    <zookeeper_log>
-        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
-    </zookeeper_log>
     <processors_profile_log>
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </processors_profile_log>

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-10 — Less Keeper logging
+
+### Before you upgrade
+
+- **ClickHouse stops writing `system.zookeeper_log` and `system.session_log`,
+  on both stacks.** Both are off in the ClickHouse image. `signoz.xml` and the
+  HA `cluster.xml` turned them on by accident: they listed the two sections to
+  give them a TTL, and listing a section is enough to enable its table.
+  `zookeeper_log` is ClickHouse's log of its own requests to Keeper (the name
+  predates Keeper): two rows per request, with the data read or written. It
+  was the largest table on a fresh standalone stack, at about 700,000 rows
+  while the schema migrator ran. Nearly all of those were ClickHouse polling
+  the distributed DDL queue until each of the migrator's 354 `ON CLUSTER`
+  statements finished. `aggregated_zookeeper_log` stays on, with per-second
+  counts, result codes and latency; [operations.md](docs/operations.md#keeper)
+  shows how to read it. Existing rows expire within a day through the TTL, or
+  `DROP TABLE system.zookeeper_log SYNC` removes them now.
+  If you used `session_log` to audit logins, put the section back in a
+  `config.d` file of your own.
+
 ## 2026-11-08 — SigNoz v0.149.0; GenAI observability checked end to end
 
 ### Before you upgrade
